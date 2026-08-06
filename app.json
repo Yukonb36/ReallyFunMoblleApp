@@ -12,6 +12,7 @@
     },
     "android": {
       "package": "com.reallyfunmoblleapp.game",
+      "kotlinVersion": "2.3.0",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
