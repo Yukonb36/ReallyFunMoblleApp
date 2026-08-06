@@ -3,6 +3,7 @@ import path from 'node:path';
 
 const root = process.cwd();
 const packageJsonPath = path.join(root, 'package.json');
+const packageLockPath = path.join(root, 'package-lock.json');
 const appJsonPath = path.join(root, 'app.json');
 const gradleWrapperPath = path.join(
   root,
@@ -34,6 +35,7 @@ function expectEqual(actual, expectedValue, label) {
 }
 
 const packageJson = readJson(packageJsonPath);
+const packageLock = readJson(packageLockPath);
 const appJson = readJson(appJsonPath);
 const dependencies = packageJson.dependencies ?? {};
 
@@ -49,6 +51,27 @@ expectEqual(
   'package.json dependencies.react-native-google-mobile-ads'
 );
 
+expectEqual(
+  packageLock?.packages?.['']?.dependencies?.expo,
+  expected.expo,
+  'package-lock.json root dependencies.expo'
+);
+expectEqual(
+  packageLock?.packages?.['']?.dependencies?.['expo-build-properties'],
+  expected.expoBuildProperties,
+  'package-lock.json root dependencies.expo-build-properties'
+);
+expectEqual(
+  packageLock?.packages?.['']?.dependencies?.['react-native-google-mobile-ads'],
+  expected.reactNativeGoogleMobileAds,
+  'package-lock.json root dependencies.react-native-google-mobile-ads'
+);
+expectEqual(
+  packageLock?.packages?.['node_modules/react-native-google-mobile-ads']?.version,
+  expected.reactNativeGoogleMobileAds,
+  'package-lock.json installed react-native-google-mobile-ads version'
+);
+
 if (appJson?.expo?.android?.kotlinVersion) {
   errors.push(
     'app.json expo.android.kotlinVersion is deprecated for this project. Use expo-build-properties plugin android.kotlinVersion only.'
@@ -60,7 +83,7 @@ const buildPropertiesPlugin = plugins.find(
   (plugin) => Array.isArray(plugin) && plugin[0] === 'expo-build-properties'
 );
 
-if (!buildPropertiesPlugin || !Array.isArray(buildPropertiesPlugin)) {
+if (!buildPropertiesPlugin) {
   errors.push('app.json must include the expo-build-properties plugin.');
 } else {
   const kotlinVersion = buildPropertiesPlugin?.[1]?.android?.kotlinVersion;
