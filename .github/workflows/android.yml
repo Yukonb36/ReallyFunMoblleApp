@@ -17,8 +17,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app.json
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -29,25 +32,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Ensure Android project exists
-        run: |
-          if [ ! -f ./gradlew ] && [ ! -f android/gradlew ]; then
-            npx expo prebuild --platform android --non-interactive
-          fi
+      - name: Generate Android project deterministically
+        run: npx expo prebuild --platform android --clean
+
+      - name: Validate Android toolchain
+        run: npm run validate:android-toolchain
 
       - name: Build debug APK
         run: |
-          if [ -f ./gradlew ]; then
-            chmod +x ./gradlew
-            ./gradlew assembleDebug
-          elif [ -f android/gradlew ]; then
-            chmod +x android/gradlew
-            cd android
-            ./gradlew assembleDebug
-          else
-            echo "No Gradle wrapper found." >&2
-            exit 1
-          fi
+          rm -rf ~/.gradle/caches/*/transforms*
+          chmod +x android/gradlew
+          cd android
+          ./gradlew --no-daemon --refresh-dependencies assembleDebug
 
       - name: Detect APK path
         id: apk
