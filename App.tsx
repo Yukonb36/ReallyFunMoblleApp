@@ -32,7 +32,7 @@ const rewardedAd = RewardedAd.createForAdRequest(TestIds.REWARDED, {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type ScreenKey = 'landing' | 'select' | 'game';
-type GameModeKey = 'surf' | 'skate' | 'hackey';
+type GameModeKey = 'surf' | 'skate' | 'hackey' | 'skydive' | 'boxrace';
 
 type GameMode = {
   name: string;
@@ -64,6 +64,13 @@ type SkateRail = { id: number; side: 'left' | 'right'; active: boolean };
 // ── Hackey game state ─
 type HackeyPlayer = { id: number; angle: number }; // angle in circle (radians)
 
+// ── Skydive game state ─
+type SkyGate = { id: number; y: number; gapX: number }; // y: 0-1 falling, gapX: 0-1 center of gap
+type SkyCloud = { id: number; x: number; y: number; r: number }; // turbulence puff
+
+// ── Box Race game state ─
+type RaceBox = { id: number; x: number; y: number; speed: number; color: string };
+
 const GAME_MODES: Record<GameModeKey, GameMode> = {
   surf: {
     name: 'Surf Ride',
@@ -91,6 +98,24 @@ const GAME_MODES: Record<GameModeKey, GameMode> = {
     tokenMultiplier: 4,
     accentColor: '#A07AFF',
     dimColor: '#1A0D33',
+  },
+  skydive: {
+    name: 'Skydive',
+    emoji: '🪂',
+    shortRules: 'Drag to steer through gates. Dodge turbulence clouds!',
+    description: 'Free-fall at terminal velocity. Thread the cloud gates and avoid turbulence to survive.',
+    tokenMultiplier: 5,
+    accentColor: '#00E5C8',
+    dimColor: '#071A2E',
+  },
+  boxrace: {
+    name: 'Box Racer',
+    emoji: '📦',
+    shortRules: 'Swipe to steer. Ram rivals, dodge walls!',
+    description: 'Top-down karting in a box car. Smash rival boxes, hit boosts, and stay on the track.',
+    tokenMultiplier: 3,
+    accentColor: '#FFB830',
+    dimColor: '#1A1000',
   },
 };
 
@@ -145,7 +170,7 @@ export default function App() {
   const [selectedMode, setSelectedMode] = useState<GameModeKey>('surf');
   const [score, setScore] = useState(0);
   const [bestScores, setBestScores] = useState<Record<GameModeKey, number>>({
-    surf: 0, skate: 0, hackey: 0,
+    surf: 0, skate: 0, hackey: 0, skydive: 0, boxrace: 0,
   });
   const [isPlaying, setIsPlaying] = useState(false);
 
@@ -199,6 +224,21 @@ export default function App() {
   const hackeyWindowRef = useRef(1);
   const hackeyTargetRef = useRef(0);
   const hackeyMissesRef = useRef(0);
+
+  // ── Skydive state ─────────────────────────────────────────────────────────
+  const [skyX, setSkyX] = useState(0.5);                   // 0-1 horizontal
+  const [skyGates, setSkyGates] = useState<SkyGate[]>([]);  // ring-gates to thread
+  const [skyClouds, setSkyClouds] = useState<SkyCloud[]>([]); // turbulence pockets
+  const [skyAltitude, setSkyAltitude] = useState(10000);    // display altitude ft
+  const [skyGatesCleared, setSkyGatesCleared] = useState(0);
+  const skyXRef = useRef(0.5);
+
+  // ── Box Race state ────────────────────────────────────────────────────────
+  const [racerX, setRacerX] = useState(0.5);               // 0-1 track position
+  const [raceBoxes, setRaceBoxes] = useState<RaceBox[]>([]);
+  const [raceBoosts, setRaceBoosts] = useState<{ id: number; x: number; y: number }[]>([]);
+  const [racerSpeed, setRacerSpeed] = useState(0);
+  const racerXRef = useRef(0.5);
 
   const activeMode = GAME_MODES[selectedMode];
   const activeCharacter = CHARACTERS.find((c) => c.id === selectedCharacterId) ?? CHARACTERS[0];
@@ -285,9 +325,8 @@ export default function App() {
   useEffect(() => { hackeyWindowRef.current = hackeyWindow; }, [hackeyWindow]);
   useEffect(() => { hackeyTargetRef.current = hackeyTarget; }, [hackeyTarget]);
   useEffect(() => { hackeyMissesRef.current = hackeyMisses; }, [hackeyMisses]);
-
-  // ══════════════════════════════════════════════════════════════════════════
-  //  SURF GAME LOOP
+  useEffect(() => { skyXRef.current = skyX; }, [skyX]);
+  useEffect(() => { racerXRef.current = racerX; }, [racerX]);
   // ══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'surf') return;
@@ -493,7 +532,207 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, selectedMode, slowMotionSeconds, hackeyCombo, score, HACKEY_PLAYERS]);
 
-  // ─── Start / Restart ──────────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SKYDIVE GAME LOOP
+  // ══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!isPlaying || selectedMode !== 'skydive') return;
+
+    const GATE_GAP = 0.28; // fraction of width that is "safe" in each gate
+
+    const interval = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      tickRef.current += 1;
+      setScore((c) => c + 1);
+
+      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
+      }
+
+      const speed = slowMotionSeconds > 0 ? 0.008 : 0.016;
+
+      // Descend altitude
+      setSkyAltitude((a) => Math.max(0, a - 50));
+
+      // Move gates down the screen and spawn new ones
+      setSkyGates((gates) => {
+        const moved = gates
+          .map((g) => ({ ...g, y: g.y + speed }))
+          .filter((g) => g.y < 1.15);
+        if (tickRef.current % 55 === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            y: -0.1,
+            gapX: 0.1 + Math.random() * 0.6,
+          });
+        }
+        return moved;
+      });
+
+      // Move clouds
+      setSkyClouds((clouds) => {
+        const moved = clouds
+          .map((c) => ({ ...c, y: c.y + speed * 0.5 }))
+          .filter((c) => c.y < 1.1);
+        if (tickRef.current % 30 === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            x: Math.random(),
+            y: -0.05,
+            r: 0.07 + Math.random() * 0.08,
+          });
+        }
+        return moved;
+      });
+
+      // Collision checks
+      setSkyGates((gates) => {
+        const sx = skyXRef.current;
+        const hit = gates.find((g) => {
+          // Gate is at y ~0.8 (near player who is at 0.82)
+          if (g.y < 0.76 || g.y > 0.88) return false;
+          const leftWall = g.gapX - GATE_GAP / 2;
+          const rightWall = g.gapX + GATE_GAP / 2;
+          return sx < leftWall || sx > rightWall;
+        });
+        const cleared = gates.find((g) => g.y > 0.76 && g.y < 0.88 &&
+          sx >= g.gapX - GATE_GAP / 2 && sx <= g.gapX + GATE_GAP / 2);
+        if (cleared) {
+          setSkyGatesCleared((c) => c + 1);
+          setScore((c) => c + 25);
+        }
+        if (hit) {
+          if (shields > 0) {
+            setShields((s) => s - 1);
+            setMessage('Clipped the gate! Shield saved you!');
+            return gates.filter((g) => g.id !== hit.id);
+          }
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          setBestScores((b) => ({ ...b, skydive: Math.max(b.skydive, score) }));
+        }
+        return gates;
+      });
+
+      // Cloud turbulence hit
+      setSkyClouds((clouds) => {
+        const sx = skyXRef.current;
+        const hit = clouds.find((c) => {
+          const dx = sx - c.x;
+          const dy = 0.82 - c.y;
+          return Math.sqrt(dx * dx + dy * dy) < c.r;
+        });
+        if (hit) {
+          if (shields > 0) {
+            setShields((s) => s - 1);
+            setMessage('Turbulence! Shield absorbed!');
+            return clouds.filter((c) => c.id !== hit.id);
+          }
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          setBestScores((b) => ({ ...b, skydive: Math.max(b.skydive, score) }));
+        }
+        return clouds;
+      });
+    }, TICK_MS);
+
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, selectedMode, slowMotionSeconds, shields, score]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  BOX RACE GAME LOOP
+  // ══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!isPlaying || selectedMode !== 'boxrace') return;
+
+    const BOX_COLORS = ['#FF4444', '#FF9900', '#CC44FF', '#FF66AA', '#44DDAA'];
+
+    const interval = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      tickRef.current += 1;
+
+      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
+      }
+
+      // Increase racer speed over time
+      setRacerSpeed((s) => Math.min(s + 0.0004, 0.025));
+      const baseSpeed = slowMotionSeconds > 0 ? 0.01 : racerSpeed;
+
+      // Move rival boxes toward player and spawn new ones
+      setRaceBoxes((boxes) => {
+        const moved = boxes
+          .map((b) => ({ ...b, y: b.y + (baseSpeed + b.speed) }))
+          .filter((b) => b.y < 1.05);
+        if (tickRef.current % 35 === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            x: 0.1 + Math.random() * 0.7,
+            y: -0.08,
+            speed: 0.005 + Math.random() * 0.008,
+            color: BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)],
+          });
+        }
+        return moved;
+      });
+
+      // Move boost pads
+      setRaceBoosts((boosts) => {
+        const moved = boosts
+          .map((b) => ({ ...b, y: b.y + baseSpeed }))
+          .filter((b) => b.y < 1.05);
+        if (tickRef.current % 80 === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            x: 0.15 + Math.random() * 0.65,
+            y: -0.08,
+          });
+        }
+        return moved;
+      });
+
+      setScore((c) => c + 1);
+
+      // Collision with rival boxes
+      setRaceBoxes((boxes) => {
+        const rx = racerXRef.current;
+        const hit = boxes.find((b) => {
+          const dx = Math.abs(rx - b.x);
+          return dx < 0.1 && b.y > 0.8 && b.y < 0.96;
+        });
+        if (hit) {
+          if (shields > 0) {
+            setShields((s) => s - 1);
+            setMessage('Crash! Shield absorbed it!');
+            return boxes.filter((b) => b.id !== hit.id);
+          }
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          setBestScores((b) => ({ ...b, boxrace: Math.max(b.boxrace, score) }));
+        }
+        return boxes;
+      });
+
+      // Pick up boost pads
+      setRaceBoosts((boosts) => {
+        const rx = racerXRef.current;
+        const hit = boosts.find((b) => {
+          const dx = Math.abs(rx - b.x);
+          return dx < 0.1 && b.y > 0.8 && b.y < 0.96;
+        });
+        if (hit) {
+          setScore((c) => c + 30);
+          setMessage('⚡ Boost! +30');
+        }
+        return hit ? boosts.filter((b) => b.id !== hit.id) : boosts;
+      });
+    }, TICK_MS);
+
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, selectedMode, slowMotionSeconds, shields, score, racerSpeed]);
+
   const resetGameState = useCallback((mode: GameModeKey) => {
     tickRef.current = 0;
     rewardedAtGameOverRef.current = false;
@@ -526,6 +765,19 @@ export default function App() {
     hackeyWindowRef.current = 1;
     hackeyMissesRef.current = 0;
     setHackeySackPos({ x: 0.5, y: 0.5 });
+    // Skydive
+    setSkyX(0.5);
+    skyXRef.current = 0.5;
+    setSkyGates([]);
+    setSkyClouds([]);
+    setSkyAltitude(10000);
+    setSkyGatesCleared(0);
+    // Box Race
+    setRacerX(0.5);
+    racerXRef.current = 0.5;
+    setRaceBoxes([]);
+    setRaceBoosts([]);
+    setRacerSpeed(0.008);
   }, []);
 
   const startGame = useCallback((mode: GameModeKey) => {
@@ -585,6 +837,30 @@ export default function App() {
         skateSpeedRef.current = clamp(skateSpeedRef.current + push, -0.15, 0.15);
         setSkateSpeed(skateSpeedRef.current);
       }
+    },
+  }), [selectedMode]);
+
+  // ─── Skydive: PanResponder ────────────────────────────────────────────────
+  const skydivePanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => selectedMode === 'skydive' && isPlayingRef.current,
+    onMoveShouldSetPanResponder: () => selectedMode === 'skydive' && isPlayingRef.current,
+    onPanResponderMove: (_, gs) => {
+      if (!isPlayingRef.current) return;
+      const newX = clamp(skyXRef.current + gs.dx / SCREEN_W * 0.05, 0.05, 0.95);
+      skyXRef.current = newX;
+      setSkyX(newX);
+    },
+  }), [selectedMode]);
+
+  // ─── Box Race: PanResponder ───────────────────────────────────────────────
+  const boxRacePanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => selectedMode === 'boxrace' && isPlayingRef.current,
+    onMoveShouldSetPanResponder: () => selectedMode === 'boxrace' && isPlayingRef.current,
+    onPanResponderMove: (_, gs) => {
+      if (!isPlayingRef.current) return;
+      const newX = clamp(racerXRef.current + gs.dx / SCREEN_W * 0.06, 0.08, 0.92);
+      racerXRef.current = newX;
+      setRacerX(newX);
     },
   }), [selectedMode]);
 
@@ -848,6 +1124,129 @@ export default function App() {
       </View>
     );
   };
+
+  const renderSkydiveGame = () => (
+    <View style={styles.gameArea} {...skydivePanResponder.panHandlers}>
+      {/* Sky background */}
+      <View style={styles.skyBg} />
+
+      {/* Cloud turbulence pockets */}
+      {skyClouds.map((c) => (
+        <View
+          key={c.id}
+          style={[
+            styles.skyCloud,
+            {
+              left: `${(c.x - c.r) * 100}%` as `${number}%`,
+              top: `${c.y * 100}%` as `${number}%`,
+              width: `${c.r * 2 * 100}%` as `${number}%`,
+              height: `${c.r * 2 * 100}%` as `${number}%`,
+              borderRadius: 999,
+            },
+          ]}
+        />
+      ))}
+
+      {/* Ring gates */}
+      {skyGates.map((g) => {
+        const gapLeftPct = (g.gapX - 0.14) * 100;
+        const gapRightPct = (1 - g.gapX - 0.14) * 100;
+        return (
+          <View
+            key={g.id}
+            style={[styles.gateRow, { top: `${g.y * 100}%` as `${number}%` }]}
+          >
+            {/* Left wall */}
+            <View style={[styles.gateWall, { width: `${gapLeftPct}%` as `${number}%` }]} />
+            {/* Gap */}
+            <View style={styles.gateGap} />
+            {/* Right wall */}
+            <View style={[styles.gateWall, { width: `${gapRightPct}%` as `${number}%` }]} />
+          </View>
+        );
+      })}
+
+      {/* Skydiver */}
+      <View
+        style={[
+          styles.skydiver,
+          {
+            left: `${skyX * 100 - 4}%` as `${number}%`,
+            backgroundColor: activeCharacter.color,
+          },
+        ]}
+      />
+
+      {/* HUD overlay */}
+      <View style={styles.skyHud}>
+        <Text style={styles.skyHudText}>🪂 {skyAltitude.toLocaleString()} ft</Text>
+        <Text style={styles.skyHudText}>Gates: {skyGatesCleared}</Text>
+      </View>
+
+      <Text style={styles.skyHint}>Drag to steer</Text>
+
+      {!isPlaying && renderGameOver()}
+    </View>
+  );
+
+  const renderBoxRaceGame = () => (
+    <View style={styles.gameArea} {...boxRacePanResponder.panHandlers}>
+      {/* Track */}
+      <View style={styles.raceTrack} />
+      <View style={[styles.raceEdge, { left: '8%' }]} />
+      <View style={[styles.raceEdge, { right: '8%' }]} />
+
+      {/* Boost pads */}
+      {raceBoosts.map((b) => (
+        <View
+          key={b.id}
+          style={[
+            styles.boostPad,
+            {
+              left: `${b.x * 100 - 4}%` as `${number}%`,
+              top: `${b.y * 100}%` as `${number}%`,
+            },
+          ]}
+        >
+          <Text style={styles.boostEmoji}>⚡</Text>
+        </View>
+      ))}
+
+      {/* Rival boxes */}
+      {raceBoxes.map((b) => (
+        <View
+          key={b.id}
+          style={[
+            styles.rivalBox,
+            {
+              left: `${b.x * 100 - 5}%` as `${number}%`,
+              top: `${b.y * 100}%` as `${number}%`,
+              backgroundColor: b.color,
+            },
+          ]}
+        >
+          <Text style={styles.rivalBoxEmoji}>📦</Text>
+        </View>
+      ))}
+
+      {/* Player box */}
+      <View
+        style={[
+          styles.playerBox,
+          {
+            left: `${racerX * 100 - 5}%` as `${number}%`,
+            backgroundColor: activeCharacter.color,
+          },
+        ]}
+      >
+        <Text style={styles.playerBoxEmoji}>🏎</Text>
+      </View>
+
+      <Text style={styles.raceHint}>Drag to steer</Text>
+
+      {!isPlaying && renderGameOver()}
+    </View>
+  );
 
   const renderGameOver = () => (
     <View style={styles.gameOverOverlay}>
@@ -1127,6 +1526,8 @@ export default function App() {
           {selectedMode === 'surf' && renderSurfGame()}
           {selectedMode === 'skate' && renderSkateGame()}
           {selectedMode === 'hackey' && renderHackeyGame()}
+          {selectedMode === 'skydive' && renderSkydiveGame()}
+          {selectedMode === 'boxrace' && renderBoxRaceGame()}
 
           {/* In-game message strip */}
           {isPlaying && message ? (
@@ -1378,4 +1779,128 @@ const styles = StyleSheet.create({
     paddingVertical: 10, paddingHorizontal: 14, marginBottom: 14, alignItems: 'center',
   },
   messageText: { color: '#7ED8A0', fontWeight: '700', fontSize: 13, textAlign: 'center' },
+
+  // ── Skydive ────────────────────────────────────────────────────────────────
+  skyBg: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#0A2A5C',
+  },
+  skyCloud: {
+    position: 'absolute',
+    backgroundColor: '#FFFFFFAA',
+  },
+  gateRow: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  gateWall: {
+    height: 22,
+    backgroundColor: '#FF4444',
+    opacity: 0.85,
+    borderRadius: 4,
+  },
+  gateGap: {
+    flex: 1,
+    height: 22,
+    borderTopWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: '#00E5C8',
+  },
+  skydiver: {
+    position: 'absolute',
+    top: '78%',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 3,
+    borderColor: '#FFFFFF66',
+  },
+  skyHud: {
+    position: 'absolute',
+    top: 12,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  skyHudText: {
+    color: '#00E5C8',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  skyHint: {
+    position: 'absolute',
+    bottom: 14,
+    left: 0,
+    right: 0,
+    textAlign: 'center',
+    color: '#1A4A7A',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+
+  // ── Box Race ──────────────────────────────────────────────────────────────
+  raceTrack: {
+    ...StyleSheet.absoluteFill,
+    marginHorizontal: '8%',
+    backgroundColor: '#1A1000',
+    borderRadius: 0,
+  },
+  raceEdge: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 6,
+    backgroundColor: '#FFB830',
+    opacity: 0.7,
+  },
+  boostPad: {
+    position: 'absolute',
+    width: 36,
+    height: 36,
+    borderRadius: 6,
+    backgroundColor: '#1A3A00',
+    borderWidth: 2,
+    borderColor: '#88FF44',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  boostEmoji: { fontSize: 18 },
+  rivalBox: {
+    position: 'absolute',
+    width: 44,
+    height: 44,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: '#FFFFFF33',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rivalBoxEmoji: { fontSize: 24 },
+  playerBox: {
+    position: 'absolute',
+    top: '82%',
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    borderWidth: 3,
+    borderColor: '#FFFFFF99',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playerBoxEmoji: { fontSize: 26 },
+  raceHint: {
+    position: 'absolute',
+    bottom: 14,
+    left: 0,
+    right: 0,
+    textAlign: 'center',
+    color: '#4A3000',
+    fontWeight: '700',
+    fontSize: 12,
+  },
 });
