@@ -1,15 +1,17 @@
 {
   "expo": {
     "name": "ReallyFunMoblleApp",
-    "slug": "ReallyFunMoblleApp",
+    "slug": "reallyfunmoblleapp",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.reallyfunmoblleapp.game"
     },
     "android": {
+      "package": "com.reallyfunmoblleapp.game",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -22,7 +24,14 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "react-native-google-mobile-ads"
+      [
+        "react-native-google-mobile-ads",
+        {
+          "android_app_id": "ca-app-pub-3940256099942544~3347511713",
+          "ios_app_id": "ca-app-pub-3940256099942544~1458002511",
+          "delay_app_measurement_init": true
+        }
+      ]
     ]
   }
 }
