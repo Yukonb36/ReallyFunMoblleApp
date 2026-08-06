@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Modal,
-  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -220,9 +219,12 @@ export default function App() {
     };
   }, [logFilePath]);
 
+  // Only reset shields when not in an active run, to avoid mid-game disruption
   useEffect(() => {
-    setShields(activeCharacter.shieldBonus);
-  }, [activeCharacter.shieldBonus]);
+    if (!isPlaying) {
+      setShields(activeCharacter.shieldBonus);
+    }
+  }, [activeCharacter.shieldBonus, isPlaying]);
 
   useEffect(() => {
     rewardedAd.load();
@@ -339,8 +341,7 @@ export default function App() {
     setScore(0);
     setMessage('');
     setSlowMotionSeconds(0);
-    const char = CHARACTERS.find((c) => c.id === selectedCharacterId) ?? CHARACTERS[0];
-    setShields(char.shieldBonus);
+    setShields(activeCharacter.shieldBonus);
     setIsPlaying(true);
     setScreen('game');
   };
@@ -374,326 +375,350 @@ export default function App() {
     setMessage(`${character.name} unlocked and equipped!`);
   };
 
-  // ─── Landing Screen ────────────────────────────────────────────────────────
-
-  const LandingScreen = () => (
-    <SafeAreaView style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Hero */}
-        <View style={styles.heroSection}>
-          <Text style={styles.heroEmoji}>🤙</Text>
-          <Text style={styles.heroTitle}>Retro Rush</Text>
-          <Text style={styles.heroTagline}>Pick your sport. Earn your run.</Text>
-          <Text style={styles.heroDesc}>
-            Three extreme sport arcade games — surf, skate, and hackey flow — with characters,
-            tokens, and high scores to chase.
-          </Text>
-        </View>
-
-        {/* Stats bar */}
-        <View style={styles.statsBar}>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{tokens}</Text>
-            <Text style={styles.statLabel}>Tokens</Text>
-          </View>
-          <View style={styles.statDivider} />
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{lifetimeTokens}</Text>
-            <Text style={styles.statLabel}>Lifetime</Text>
-          </View>
-          <View style={styles.statDivider} />
-          <View style={styles.statItem}>
-            <View style={[styles.charDot, { backgroundColor: activeCharacter.color }]} />
-            <Text style={styles.statLabel}>{activeCharacter.name}</Text>
-          </View>
-        </View>
-
-        {/* Primary CTA */}
-        <Pressable
-          onPress={() => setScreen('select')}
-          style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
-        >
-          <Text style={styles.primaryBtnText}>Select Game  →</Text>
-        </Pressable>
-
-        {/* Characters button */}
-        <Pressable
-          onPress={() => setShowCharacters(true)}
-          style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
-        >
-          <Text style={styles.secondaryBtnText}>🎽  Characters & Unlocks</Text>
-        </Pressable>
-
-        {/* Reward ad */}
-        <Pressable
-          onPress={watchRewardAd}
-          style={({ pressed }) => [
-            styles.adBtn,
-            !rewardLoaded && styles.adBtnDisabled,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Text style={styles.adBtnText}>
-            {rewardLoaded ? '🎬  Watch Ad: +Tokens +Shield +Slow Motion' : '⏳  Loading Reward Ad…'}
-          </Text>
-        </Pressable>
-
-        {/* Best scores summary */}
-        <Text style={styles.sectionHeader}>Personal Bests</Text>
-        <View style={styles.bestsRow}>
-          {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => (
-            <View key={key} style={[styles.bestCard, { borderColor: GAME_MODES[key].accentColor }]}>
-              <Text style={styles.bestEmoji}>{GAME_MODES[key].emoji}</Text>
-              <Text style={[styles.bestScore, { color: GAME_MODES[key].accentColor }]}>
-                {bestScores[key]}
-              </Text>
-              <Text style={styles.bestLabel}>{GAME_MODES[key].name}</Text>
+  return (
+    <>
+      {/* ── Character Modal ─────────────────────────────────────────────── */}
+      <Modal
+        visible={showCharacters}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setShowCharacters(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Characters</Text>
+              <Pressable onPress={() => setShowCharacters(false)} style={styles.modalClose}>
+                <Text style={styles.modalCloseText}>✕</Text>
+              </Pressable>
             </View>
-          ))}
-        </View>
-
-        {message ? (
-          <View style={styles.messageBanner}>
-            <Text style={styles.messageText}>{message}</Text>
+            <Text style={styles.modalTokens}>Tokens: {tokens}</Text>
+            {message ? (
+              <View style={[styles.messageBanner, { marginHorizontal: 0, marginBottom: 10 }]}>
+                <Text style={styles.messageText}>{message}</Text>
+              </View>
+            ) : null}
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {CHARACTERS.map((char) => {
+                const isOwned = ownedCharacters.includes(char.id);
+                const isSelected = selectedCharacterId === char.id;
+                return (
+                  <Pressable
+                    key={char.id}
+                    onPress={() => handleCharacterAction(char)}
+                    style={[styles.charCard, isSelected && { borderColor: char.color }]}
+                  >
+                    <View style={[styles.charColorBar, { backgroundColor: char.color }]} />
+                    <View style={styles.charCardBody}>
+                      <View style={styles.charCardTop}>
+                        <Text style={styles.charCardName}>{char.name}</Text>
+                        {isOwned ? (
+                          <View
+                            style={[
+                              styles.charBadge,
+                              isSelected ? styles.charBadgeEquipped : styles.charBadgeOwned,
+                            ]}
+                          >
+                            <Text style={styles.charBadgeText}>
+                              {isSelected ? 'Equipped' : 'Owned'}
+                            </Text>
+                          </View>
+                        ) : (
+                          <View style={styles.charBadgeLocked}>
+                            <Text style={styles.charBadgeText}>🔒 {char.cost}</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={styles.charCardDesc}>{char.bonusDescription}</Text>
+                      <Text style={styles.charCardSub}>
+                        🛡 +{char.shieldBonus} shield
+                        {char.slowMotionBonus > 0
+                          ? `   ⏱ +${char.slowMotionBonus}s slow motion`
+                          : ''}
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
           </View>
-        ) : null}
-      </ScrollView>
-    </SafeAreaView>
-  );
-
-  // ─── Select Screen ─────────────────────────────────────────────────────────
-
-  const SelectScreen = () => (
-    <SafeAreaView style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <View style={styles.navRow}>
-          <Pressable onPress={() => setScreen('landing')} style={styles.backBtn}>
-            <Text style={styles.backBtnText}>← Back</Text>
-          </Pressable>
-          <Text style={styles.navTitle}>Choose Your Sport</Text>
-          <View style={{ width: 64 }} />
         </View>
+      </Modal>
 
-        {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => {
-          const mode = GAME_MODES[key];
-          return (
+      {/* ── Landing Screen ──────────────────────────────────────────────── */}
+      {screen === 'landing' && (
+        <SafeAreaView style={styles.screen}>
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Hero */}
+            <View style={styles.heroSection}>
+              <Text style={styles.heroEmoji}>🤙</Text>
+              <Text style={styles.heroTitle}>Retro Rush</Text>
+              <Text style={styles.heroTagline}>Pick your sport. Earn your run.</Text>
+              <Text style={styles.heroDesc}>
+                Three extreme sport arcade games — surf, skate, and hackey flow — with
+                characters, tokens, and high scores to chase.
+              </Text>
+            </View>
+
+            {/* Stats bar */}
+            <View style={styles.statsBar}>
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>{tokens}</Text>
+                <Text style={styles.statLabel}>Tokens</Text>
+              </View>
+              <View style={styles.statDivider} />
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>{lifetimeTokens}</Text>
+                <Text style={styles.statLabel}>Lifetime</Text>
+              </View>
+              <View style={styles.statDivider} />
+              <View style={styles.statItem}>
+                <View style={[styles.charDot, { backgroundColor: activeCharacter.color }]} />
+                <Text style={styles.statLabel}>{activeCharacter.name}</Text>
+              </View>
+            </View>
+
+            {/* Primary CTA */}
             <Pressable
-              key={key}
-              onPress={() => startGame(key)}
+              onPress={() => setScreen('select')}
+              style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+            >
+              <Text style={styles.primaryBtnText}>Select Game →</Text>
+            </Pressable>
+
+            {/* Characters button */}
+            <Pressable
+              onPress={() => setShowCharacters(true)}
+              style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+            >
+              <Text style={styles.secondaryBtnText}>🎽  Characters & Unlocks</Text>
+            </Pressable>
+
+            {/* Reward ad */}
+            <Pressable
+              onPress={watchRewardAd}
               style={({ pressed }) => [
-                styles.modeCard,
-                { borderColor: mode.accentColor, backgroundColor: mode.dimColor },
+                styles.adBtn,
+                !rewardLoaded && styles.adBtnDisabled,
                 pressed && styles.pressed,
               ]}
             >
-              <View style={styles.modeCardTop}>
-                <Text style={styles.modeEmoji}>{mode.emoji}</Text>
-                <View style={styles.modeCardInfo}>
-                  <Text style={[styles.modeCardName, { color: mode.accentColor }]}>{mode.name}</Text>
-                  <Text style={styles.modeCardDesc}>{mode.description}</Text>
+              <Text style={styles.adBtnText}>
+                {rewardLoaded
+                  ? '🎬  Watch Ad: +Tokens +Shield +Slow Motion'
+                  : '⏳  Loading Reward Ad…'}
+              </Text>
+            </Pressable>
+
+            {/* Best scores */}
+            <Text style={styles.sectionHeader}>Personal Bests</Text>
+            <View style={styles.bestsRow}>
+              {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => (
+                <View
+                  key={key}
+                  style={[styles.bestCard, { borderColor: GAME_MODES[key].accentColor }]}
+                >
+                  <Text style={styles.bestEmoji}>{GAME_MODES[key].emoji}</Text>
+                  <Text style={[styles.bestScore, { color: GAME_MODES[key].accentColor }]}>
+                    {bestScores[key]}
+                  </Text>
+                  <Text style={styles.bestLabel}>{GAME_MODES[key].name}</Text>
                 </View>
-                <View style={[styles.multiplierBadge, { backgroundColor: mode.accentColor }]}>
-                  <Text style={styles.multiplierText}>x{mode.tokenMultiplier}</Text>
-                </View>
-              </View>
-              <View style={styles.modeCardBottom}>
-                <Text style={styles.modeCardRule}>{mode.shortRules}</Text>
-                <Text style={styles.modeCardBest}>
-                  Best: <Text style={{ color: mode.accentColor }}>{bestScores[key]}</Text>
-                </Text>
-              </View>
-              <View style={[styles.startPill, { backgroundColor: mode.accentColor }]}>
-                <Text style={styles.startPillText}>TAP TO PLAY</Text>
-              </View>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
-    </SafeAreaView>
-  );
-
-  // ─── Game Screen ───────────────────────────────────────────────────────────
-
-  const GameScreen = () => (
-    <SafeAreaView style={[styles.screen, { backgroundColor: activeMode.dimColor }]}>
-      {/* HUD */}
-      <View style={[styles.gameHud, { borderBottomColor: activeMode.accentColor }]}>
-        <Pressable
-          onPress={() => {
-            if (!isPlaying) setScreen('select');
-          }}
-          style={styles.hudBack}
-        >
-          <Text style={[styles.hudBackText, isPlaying && styles.hudBackDisabled]}>←</Text>
-        </Pressable>
-        <View style={styles.hudCenter}>
-          <Text style={[styles.hudMode, { color: activeMode.accentColor }]}>
-            {activeMode.emoji}  {activeMode.name}
-          </Text>
-        </View>
-        <View style={styles.hudRight}>
-          <Text style={styles.hudStat}>Score {score}</Text>
-          <Text style={styles.hudStat}>🛡 {shields}</Text>
-          {slowMotionSeconds > 0 ? (
-            <Text style={[styles.hudStat, { color: '#FFD700' }]}>⏱ {slowMotionSeconds}s</Text>
-          ) : null}
-        </View>
-      </View>
-
-      {/* Game area */}
-      <View style={styles.gameArea}>
-        <View style={styles.laneDivider} />
-        <View style={[styles.laneDivider, styles.secondDivider]} />
-
-        {obstacles.map((o) => (
-          <View
-            key={o.id}
-            style={[
-              styles.obstacle,
-              {
-                backgroundColor: activeMode.obstacleColor,
-                left: `${o.lane * (100 / LANE_COUNT) + 7}%` as `${number}%`,
-                top: `${o.y}%` as `${number}%`,
-              },
-            ]}
-          />
-        ))}
-
-        <View
-          style={[
-            styles.player,
-            {
-              backgroundColor: activeCharacter.color,
-              left: `${playerLane * (100 / LANE_COUNT) + 7}%` as `${number}%`,
-            },
-          ]}
-        />
-
-        {/* Game Over overlay */}
-        {!isPlaying ? (
-          <View style={styles.gameOverOverlay}>
-            <Text style={styles.gameOverTitle}>Run Over</Text>
-            <Text style={styles.gameOverScore}>{score}</Text>
-            <Text style={styles.gameOverLabel}>score</Text>
-            <Text style={styles.gameOverBest}>
-              Best: {bestScores[selectedMode]}
-            </Text>
-            {message ? <Text style={styles.gameOverMsg}>{message}</Text> : null}
-            <Pressable
-              onPress={restartGame}
-              style={[styles.gameOverBtn, { backgroundColor: activeMode.accentColor }]}
-            >
-              <Text style={styles.gameOverBtnText}>Play Again</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setScreen('select')}
-              style={styles.gameOverSecondary}
-            >
-              <Text style={styles.gameOverSecondaryText}>Change Sport</Text>
-            </Pressable>
-            {rewardLoaded ? (
-              <Pressable onPress={watchRewardAd} style={styles.gameOverAdBtn}>
-                <Text style={styles.gameOverAdText}>🎬 Watch Ad for Bonus</Text>
-              </Pressable>
-            ) : null}
-          </View>
-        ) : null}
-      </View>
-
-      {/* In-game message strip */}
-      {isPlaying && message ? (
-        <View style={[styles.inGameMsg, { backgroundColor: activeMode.accentColor + '33' }]}>
-          <Text style={[styles.inGameMsgText, { color: activeMode.accentColor }]}>{message}</Text>
-        </View>
-      ) : null}
-
-      {/* Controls — large tap zones */}
-      {isPlaying ? (
-        <View style={styles.controlsArea}>
-          <Pressable onPress={moveLeft} style={({ pressed }) => [styles.tapZone, pressed && styles.tapZonePressed]}>
-            <Text style={styles.tapZoneText}>◀ LEFT</Text>
-          </Pressable>
-          <Pressable onPress={moveRight} style={({ pressed }) => [styles.tapZone, pressed && styles.tapZonePressed]}>
-            <Text style={styles.tapZoneText}>RIGHT ▶</Text>
-          </Pressable>
-        </View>
-      ) : null}
-    </SafeAreaView>
-  );
-
-  // ─── Character Modal ───────────────────────────────────────────────────────
-
-  const CharacterModal = () => (
-    <Modal
-      visible={showCharacters}
-      animationType="slide"
-      transparent
-      onRequestClose={() => setShowCharacters(false)}
-    >
-      <View style={styles.modalBackdrop}>
-        <View style={styles.modalSheet}>
-          <View style={styles.modalHandle} />
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Characters</Text>
-            <Pressable onPress={() => setShowCharacters(false)} style={styles.modalClose}>
-              <Text style={styles.modalCloseText}>✕</Text>
-            </Pressable>
-          </View>
-          <Text style={styles.modalTokens}>Tokens: {tokens}</Text>
-          {message ? (
-            <View style={[styles.messageBanner, { marginHorizontal: 0, marginBottom: 10 }]}>
-              <Text style={styles.messageText}>{message}</Text>
+              ))}
             </View>
-          ) : null}
-          <ScrollView showsVerticalScrollIndicator={false}>
-            {CHARACTERS.map((char) => {
-              const isOwned = ownedCharacters.includes(char.id);
-              const isSelected = selectedCharacterId === char.id;
+
+            {message ? (
+              <View style={styles.messageBanner}>
+                <Text style={styles.messageText}>{message}</Text>
+              </View>
+            ) : null}
+          </ScrollView>
+        </SafeAreaView>
+      )}
+
+      {/* ── Select Screen ───────────────────────────────────────────────── */}
+      {screen === 'select' && (
+        <SafeAreaView style={styles.screen}>
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.navRow}>
+              <Pressable onPress={() => setScreen('landing')} style={styles.backBtn}>
+                <Text style={styles.backBtnText}>← Back</Text>
+              </Pressable>
+              <Text style={styles.navTitle}>Choose Your Sport</Text>
+              <View style={{ width: 64 }} />
+            </View>
+
+            {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => {
+              const mode = GAME_MODES[key];
               return (
                 <Pressable
-                  key={char.id}
-                  onPress={() => handleCharacterAction(char)}
-                  style={[
-                    styles.charCard,
-                    isSelected && { borderColor: char.color },
+                  key={key}
+                  onPress={() => startGame(key)}
+                  style={({ pressed }) => [
+                    styles.modeCard,
+                    { borderColor: mode.accentColor, backgroundColor: mode.dimColor },
+                    pressed && styles.pressed,
                   ]}
                 >
-                  <View style={[styles.charColorBar, { backgroundColor: char.color }]} />
-                  <View style={styles.charCardBody}>
-                    <View style={styles.charCardTop}>
-                      <Text style={styles.charCardName}>{char.name}</Text>
-                      {isOwned ? (
-                        <View style={[styles.charBadge, isSelected ? styles.charBadgeEquipped : styles.charBadgeOwned]}>
-                          <Text style={styles.charBadgeText}>{isSelected ? 'Equipped' : 'Owned'}</Text>
-                        </View>
-                      ) : (
-                        <View style={styles.charBadgeLocked}>
-                          <Text style={styles.charBadgeText}>🔒 {char.cost}</Text>
-                        </View>
-                      )}
+                  <View style={styles.modeCardTop}>
+                    <Text style={styles.modeEmoji}>{mode.emoji}</Text>
+                    <View style={styles.modeCardInfo}>
+                      <Text style={[styles.modeCardName, { color: mode.accentColor }]}>
+                        {mode.name}
+                      </Text>
+                      <Text style={styles.modeCardDesc}>{mode.description}</Text>
                     </View>
-                    <Text style={styles.charCardDesc}>{char.bonusDescription}</Text>
-                    <Text style={styles.charCardSub}>
-                      🛡 +{char.shieldBonus} shield{char.slowMotionBonus > 0 ? `   ⏱ +${char.slowMotionBonus}s slow motion` : ''}
+                    <View
+                      style={[styles.multiplierBadge, { backgroundColor: mode.accentColor }]}
+                    >
+                      <Text style={styles.multiplierText}>x{mode.tokenMultiplier}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.modeCardBottom}>
+                    <Text style={styles.modeCardRule}>{mode.shortRules}</Text>
+                    <Text style={styles.modeCardBest}>
+                      Best:{' '}
+                      <Text style={{ color: mode.accentColor }}>{bestScores[key]}</Text>
                     </Text>
+                  </View>
+                  <View style={[styles.startPill, { backgroundColor: mode.accentColor }]}>
+                    <Text style={styles.startPillText}>TAP TO PLAY</Text>
                   </View>
                 </Pressable>
               );
             })}
           </ScrollView>
-        </View>
-      </View>
-    </Modal>
-  );
+        </SafeAreaView>
+      )}
 
-  // ─── Root render ───────────────────────────────────────────────────────────
+      {/* ── Game Screen ─────────────────────────────────────────────────── */}
+      {screen === 'game' && (
+        <SafeAreaView style={[styles.screen, { backgroundColor: activeMode.dimColor }]}>
+          {/* HUD */}
+          <View style={[styles.gameHud, { borderBottomColor: activeMode.accentColor }]}>
+            <Pressable
+              onPress={() => {
+                if (isPlaying) {
+                  setMessage('Finish your run to exit.');
+                } else {
+                  setScreen('select');
+                }
+              }}
+              style={styles.hudBack}
+            >
+              <Text style={[styles.hudBackText, isPlaying && styles.hudBackDisabled]}>←</Text>
+            </Pressable>
+            <View style={styles.hudCenter}>
+              <Text style={[styles.hudMode, { color: activeMode.accentColor }]}>
+                {activeMode.emoji}  {activeMode.name}
+              </Text>
+            </View>
+            <View style={styles.hudRight}>
+              <Text style={styles.hudStat}>Score {score}</Text>
+              <Text style={styles.hudStat}>🛡 {shields}</Text>
+              {slowMotionSeconds > 0 ? (
+                <Text style={[styles.hudStat, { color: '#FFD700' }]}>⏱ {slowMotionSeconds}s</Text>
+              ) : null}
+            </View>
+          </View>
 
-  return (
-    <>
-      <CharacterModal />
-      {screen === 'landing' && <LandingScreen />}
-      {screen === 'select' && <SelectScreen />}
-      {screen === 'game' && <GameScreen />}
+          {/* Game area */}
+          <View style={styles.gameArea}>
+            <View style={styles.laneDivider} />
+            <View style={[styles.laneDivider, styles.secondDivider]} />
+
+            {obstacles.map((o) => (
+              <View
+                key={o.id}
+                style={[
+                  styles.obstacle,
+                  {
+                    backgroundColor: activeMode.obstacleColor,
+                    left: `${o.lane * (100 / LANE_COUNT) + 7}%` as `${number}%`,
+                    top: `${o.y}%` as `${number}%`,
+                  },
+                ]}
+              />
+            ))}
+
+            <View
+              style={[
+                styles.player,
+                {
+                  backgroundColor: activeCharacter.color,
+                  left: `${playerLane * (100 / LANE_COUNT) + 7}%` as `${number}%`,
+                },
+              ]}
+            />
+
+            {/* Game Over overlay */}
+            {!isPlaying ? (
+              <View style={styles.gameOverOverlay}>
+                <Text style={styles.gameOverTitle}>Run Over</Text>
+                <Text style={styles.gameOverScore}>{score}</Text>
+                <Text style={styles.gameOverLabel}>score</Text>
+                <Text style={styles.gameOverBest}>Best: {bestScores[selectedMode]}</Text>
+                {message ? (
+                  <Text style={styles.gameOverMsg}>{message}</Text>
+                ) : null}
+                <Pressable
+                  onPress={restartGame}
+                  style={[styles.gameOverBtn, { backgroundColor: activeMode.accentColor }]}
+                >
+                  <Text style={styles.gameOverBtnText}>Play Again</Text>
+                </Pressable>
+                <Pressable onPress={() => setScreen('select')} style={styles.gameOverSecondary}>
+                  <Text style={styles.gameOverSecondaryText}>Change Sport</Text>
+                </Pressable>
+                {rewardLoaded ? (
+                  <Pressable onPress={watchRewardAd} style={styles.gameOverAdBtn}>
+                    <Text style={styles.gameOverAdText}>🎬 Watch Ad for Bonus</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
+
+          {/* In-game message strip */}
+          {isPlaying && message ? (
+            <View
+              style={[
+                styles.inGameMsg,
+                { backgroundColor: activeMode.accentColor + '33' },
+              ]}
+            >
+              <Text style={[styles.inGameMsgText, { color: activeMode.accentColor }]}>
+                {message}
+              </Text>
+            </View>
+          ) : null}
+
+          {/* Controls — large tap zones */}
+          {isPlaying ? (
+            <View style={styles.controlsArea}>
+              <Pressable
+                onPress={moveLeft}
+                style={({ pressed }) => [styles.tapZone, pressed && styles.tapZonePressed]}
+              >
+                <Text style={styles.tapZoneText}>◀ LEFT</Text>
+              </Pressable>
+              <Pressable
+                onPress={moveRight}
+                style={({ pressed }) => [styles.tapZone, pressed && styles.tapZonePressed]}
+              >
+                <Text style={styles.tapZoneText}>RIGHT ▶</Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </SafeAreaView>
+      )}
     </>
   );
 }
