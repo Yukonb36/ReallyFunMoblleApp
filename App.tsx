@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Platform,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -27,16 +26,21 @@ const rewardedAd = RewardedAd.createForAdRequest(TestIds.REWARDED, {
   requestNonPersonalizedAdsOnly: true,
 });
 
+type ScreenKey = 'landing' | 'select' | 'game';
 type GameModeKey = 'surf' | 'skate' | 'hackey';
 
 type GameMode = {
   name: string;
+  emoji: string;
   shortRules: string;
+  description: string;
   instruction: string;
   tokenMultiplier: number;
   spawnEveryTicks: number;
   baseSpeed: number;
   obstacleColor: string;
+  accentColor: string;
+  dimColor: string;
 };
 
 type Obstacle = {
@@ -58,33 +62,45 @@ type Character = {
 const GAME_MODES: Record<GameModeKey, GameMode> = {
   surf: {
     name: 'Surf Sprint',
+    emoji: '🏄',
     shortRules: 'Ride wave lanes and dodge reef spikes.',
+    description: 'Catch the swell and outrun the reef. Steady rhythm, medium speed.',
     instruction:
       'Tap Left/Right to switch lanes and avoid reef spikes. Surf mode has steady wave rhythm and medium speed.',
     tokenMultiplier: 2,
     spawnEveryTicks: 8,
     baseSpeed: 4.8,
     obstacleColor: '#2E7ACD',
+    accentColor: '#56B0FF',
+    dimColor: '#0D2A45',
   },
   skate: {
     name: 'Skate Rush',
+    emoji: '🛹',
     shortRules: 'Street sprint with fast barriers.',
+    description: 'Fastest mode. Quick lane switches to dodge rails and benches.',
     instruction:
       'Skate mode is the fastest. Keep quick lane changes to avoid rails and benches with shorter reaction windows.',
     tokenMultiplier: 3,
     spawnEveryTicks: 7,
     baseSpeed: 5.8,
     obstacleColor: '#B94A48',
+    accentColor: '#FF6B6B',
+    dimColor: '#330D0D',
   },
   hackey: {
     name: 'Hackey Flow',
+    emoji: '🤸',
     shortRules: 'Rhythm dodge with surprise cones.',
+    description: 'Unpredictable spawns. Stay centered and react fast.',
     instruction:
       'Hackey mode has unpredictable spawn rhythms. Stay centered when possible and react to sudden cone patterns.',
     tokenMultiplier: 4,
     spawnEveryTicks: 6,
     baseSpeed: 5.2,
     obstacleColor: '#7A5BC8',
+    accentColor: '#A07AFF',
+    dimColor: '#1A0D33',
   },
 };
 
@@ -105,7 +121,7 @@ const CHARACTERS: Character[] = [
     color: '#56A3FF',
     shieldBonus: 2,
     slowMotionBonus: 3,
-    bonusDescription: '+1 extra starting shield and longer slow motion.',
+    bonusDescription: '+1 extra shield & longer slow motion.',
   },
   {
     id: 'street-ace',
@@ -114,7 +130,7 @@ const CHARACTERS: Character[] = [
     color: '#FF8E5B',
     shieldBonus: 2,
     slowMotionBonus: 5,
-    bonusDescription: 'Extended boost duration for high-score pushes.',
+    bonusDescription: 'Extended boost for high-score pushes.',
   },
   {
     id: 'freestyle-legend',
@@ -131,6 +147,7 @@ export default function App() {
   const tickRef = useRef(0);
   const rewardedAtGameOverRef = useRef(false);
 
+  const [screen, setScreen] = useState<ScreenKey>('landing');
   const [selectedMode, setSelectedMode] = useState<GameModeKey>('surf');
   const [playerLane, setPlayerLane] = useState(1);
   const [obstacles, setObstacles] = useState<Obstacle[]>([]);
@@ -140,7 +157,7 @@ export default function App() {
     skate: 0,
     hackey: 0,
   });
-  const [isPlaying, setIsPlaying] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   const [tokens, setTokens] = useState(0);
   const [lifetimeTokens, setLifetimeTokens] = useState(0);
@@ -151,14 +168,12 @@ export default function App() {
   const [slowMotionSeconds, setSlowMotionSeconds] = useState(0);
   const [rewardLoaded, setRewardLoaded] = useState(false);
   const [message, setMessage] = useState('');
-  const [showInstructions, setShowInstructions] = useState(true);
-  const [logFilePath, setLogFilePath] = useState(DEFAULT_LOG_FILE);
-  const [logFolderInput, setLogFolderInput] = useState(DEFAULT_LOG_DIR);
-  const [lastLogWritePath, setLastLogWritePath] = useState(DEFAULT_LOG_FILE);
+  const [showCharacters, setShowCharacters] = useState(false);
+  const [logFilePath] = useState(DEFAULT_LOG_FILE);
 
   const activeMode = GAME_MODES[selectedMode];
   const activeCharacter =
-    CHARACTERS.find((character) => character.id === selectedCharacterId) ?? CHARACTERS[0];
+    CHARACTERS.find((c) => c.id === selectedCharacterId) ?? CHARACTERS[0];
 
   const obstacleSpeed = useMemo(
     () => (slowMotionSeconds > 0 ? activeMode.baseSpeed * 0.6 : activeMode.baseSpeed),
@@ -168,39 +183,20 @@ export default function App() {
   const appendErrorLog = async (error: unknown, context: string) => {
     try {
       const printableError =
-        error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error);
+        error instanceof Error
+          ? `${error.name}: ${error.message}\n${error.stack ?? ''}`
+          : String(error);
       const logLine = `[${new Date().toISOString()}] [${context}] ${printableError}\n\n`;
-
-      if (logFilePath.startsWith('content://')) {
-        const folderUri = logFilePath.endsWith('/alpha-errors.txt')
-          ? logFilePath.slice(0, -'/alpha-errors.txt'.length)
-          : logFilePath;
-        const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
-          folderUri,
-          `alpha-errors-${Date.now()}`,
-          'text/plain'
-        );
-        await FileSystem.writeAsStringAsync(fileUri, logLine, {
-          encoding: FileSystem.EncodingType.UTF8,
-        });
-        setLastLogWritePath(fileUri);
-      } else {
-        const folderPath = logFilePath.replace(/[^/]+$/, '');
-        await FileSystem.makeDirectoryAsync(folderPath, { intermediates: true });
-        await FileSystem.writeAsStringAsync(logFilePath, logLine, {
-          encoding: FileSystem.EncodingType.UTF8,
-          append: true,
-        });
-        setLastLogWritePath(logFilePath);
-      }
-    } catch (logWriteError) {
-      setMessage(`Could not write log file: ${String(logWriteError)}`);
+      const folderPath = logFilePath.replace(/[^/]+$/, '');
+      await FileSystem.makeDirectoryAsync(folderPath, { intermediates: true });
+      await FileSystem.writeAsStringAsync(logFilePath, logLine, {
+        encoding: FileSystem.EncodingType.UTF8,
+        append: true,
+      });
+    } catch {
+      // silently swallow log errors in production UI
     }
   };
-
-  useEffect(() => {
-    setShields(activeCharacter.shieldBonus);
-  }, [activeCharacter.shieldBonus]);
 
   useEffect(() => {
     const errorUtils = (
@@ -212,12 +208,10 @@ export default function App() {
       }
     ).ErrorUtils;
     const previousHandler = errorUtils?.getGlobalHandler?.();
-
     errorUtils?.setGlobalHandler?.((error, isFatal) => {
       void appendErrorLog(error, isFatal ? 'UnhandledFatal' : 'Unhandled');
       previousHandler?.(error, isFatal);
     });
-
     return () => {
       if (previousHandler) {
         errorUtils?.setGlobalHandler?.(previousHandler);
@@ -225,62 +219,51 @@ export default function App() {
     };
   }, [logFilePath]);
 
+  // Only reset shields when not in an active run, to avoid mid-game disruption
+  useEffect(() => {
+    if (!isPlaying) {
+      setShields(activeCharacter.shieldBonus);
+    }
+  }, [activeCharacter.shieldBonus, isPlaying]);
+
   useEffect(() => {
     rewardedAd.load();
-
-    const loadedUnsubscribe = rewardedAd.addAdEventListener(
-      RewardedAdEventType.LOADED,
-      () => {
-        setRewardLoaded(true);
-      }
-    );
-
-    const earnedUnsubscribe = rewardedAd.addAdEventListener(
-      RewardedAdEventType.EARNED_REWARD,
-      () => {
-        const bonusDuration = SLOW_MOTION_BASE_DURATION + activeCharacter.slowMotionBonus;
-        setTokens((current) => current + 40);
-        setLifetimeTokens((current) => current + 40);
-        setShields((current) => current + 1);
-        setSlowMotionSeconds((current) => Math.max(current, bonusDuration));
-        setMessage('Ad reward: +40 tokens, +1 shield, slow motion activated!');
-      }
-    );
-
-    const closedUnsubscribe = rewardedAd.addAdEventListener(AdEventType.CLOSED, () => {
+    const loadedUnsub = rewardedAd.addAdEventListener(RewardedAdEventType.LOADED, () => {
+      setRewardLoaded(true);
+    });
+    const earnedUnsub = rewardedAd.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
+      const bonusDuration = SLOW_MOTION_BASE_DURATION + activeCharacter.slowMotionBonus;
+      setTokens((c) => c + 40);
+      setLifetimeTokens((c) => c + 40);
+      setShields((c) => c + 1);
+      setSlowMotionSeconds((c) => Math.max(c, bonusDuration));
+      setMessage('Ad reward: +40 tokens, +1 shield, slow motion activated!');
+    });
+    const closedUnsub = rewardedAd.addAdEventListener(AdEventType.CLOSED, () => {
       setRewardLoaded(false);
       rewardedAd.load();
     });
-
-    const failedUnsubscribe = rewardedAd.addAdEventListener(AdEventType.ERROR, () => {
+    const failedUnsub = rewardedAd.addAdEventListener(AdEventType.ERROR, () => {
       setRewardLoaded(false);
-      setMessage('Ad unavailable right now. Attempting to load again.');
-      void appendErrorLog('Rewarded ad load/show error event', 'RewardedAd');
       rewardedAd.load();
     });
-
     return () => {
-      loadedUnsubscribe();
-      earnedUnsubscribe();
-      closedUnsubscribe();
-      failedUnsubscribe();
+      loadedUnsub();
+      earnedUnsub();
+      closedUnsub();
+      failedUnsub();
     };
   }, [activeCharacter.slowMotionBonus]);
 
   useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-
+    if (!isPlaying) return;
     const interval = setInterval(() => {
       tickRef.current += 1;
-      setScore((current) => current + 1);
-
+      setScore((c) => c + 1);
       setObstacles((current) => {
         const moved = current
-          .map((obstacle) => ({ ...obstacle, y: obstacle.y + obstacleSpeed }))
-          .filter((obstacle) => obstacle.y < 100);
-
+          .map((o) => ({ ...o, y: o.y + obstacleSpeed }))
+          .filter((o) => o.y < 100);
         if (tickRef.current % activeMode.spawnEveryTicks === 0) {
           moved.push({
             id: Date.now() + Math.random(),
@@ -288,362 +271,455 @@ export default function App() {
             y: 0,
           });
         }
-
         return moved;
       });
-
       if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
-        setSlowMotionSeconds((current) => Math.max(current - 1, 0));
+        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
     }, TICK_MS);
-
     return () => clearInterval(interval);
   }, [activeMode.spawnEveryTicks, isPlaying, obstacleSpeed, slowMotionSeconds]);
 
   useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-
-    const incomingHit = obstacles.find(
-      (obstacle) => obstacle.lane === playerLane && obstacle.y > 76 && obstacle.y < 94
+    if (!isPlaying) return;
+    const hit = obstacles.find(
+      (o) => o.lane === playerLane && o.y > 76 && o.y < 94
     );
-
-    if (!incomingHit) {
-      return;
-    }
-
+    if (!hit) return;
     if (shields > 0) {
-      setShields((current) => current - 1);
-      setObstacles((current) => current.filter((obstacle) => obstacle.id !== incomingHit.id));
+      setShields((c) => c - 1);
+      setObstacles((c) => c.filter((o) => o.id !== hit.id));
       setMessage('Shield absorbed the impact!');
       return;
     }
-
     setIsPlaying(false);
-    setBestScores((current) => ({
-      ...current,
-      [selectedMode]: Math.max(current[selectedMode], score),
+    setBestScores((c) => ({
+      ...c,
+      [selectedMode]: Math.max(c[selectedMode], score),
     }));
   }, [isPlaying, obstacles, playerLane, score, selectedMode, shields]);
 
   useEffect(() => {
-    if (isPlaying || rewardedAtGameOverRef.current) {
-      return;
-    }
-
+    if (isPlaying || rewardedAtGameOverRef.current) return;
     rewardedAtGameOverRef.current = true;
     const runPayout = Math.max(5, Math.floor(score / 8) * activeMode.tokenMultiplier);
-
-    setTokens((current) => current + runPayout);
-    setLifetimeTokens((current) => current + runPayout);
-    setMessage(`Run complete. You earned ${runPayout} tokens from ${activeMode.name}.`);
+    setTokens((c) => c + runPayout);
+    setLifetimeTokens((c) => c + runPayout);
+    setMessage(`Run complete! +${runPayout} tokens from ${activeMode.name}.`);
   }, [activeMode.name, activeMode.tokenMultiplier, isPlaying, score]);
 
   const moveLeft = () => {
-    if (!isPlaying) {
-      return;
-    }
-
-    setPlayerLane((current) => Math.max(0, current - 1));
+    if (!isPlaying) return;
+    setPlayerLane((c) => Math.max(0, c - 1));
   };
 
   const moveRight = () => {
-    if (!isPlaying) {
-      return;
-    }
-
-    setPlayerLane((current) => Math.min(LANE_COUNT - 1, current + 1));
+    if (!isPlaying) return;
+    setPlayerLane((c) => Math.min(LANE_COUNT - 1, c + 1));
   };
 
   const watchRewardAd = () => {
     if (!rewardLoaded) {
-      setMessage('Reward ad still loading. Try again in a moment.');
+      setMessage('Reward ad still loading. Try again shortly.');
       return;
     }
-
     try {
       rewardedAd.show();
       setRewardLoaded(false);
-      setMessage('Watching rewarded ad...');
     } catch (error) {
       void appendErrorLog(error, 'WatchRewardAd');
       setMessage('Unable to show rewarded ad.');
     }
   };
 
-  const simulatePaidTokenPack = () => {
-    setTokens((current) => current + 300);
-    setLifetimeTokens((current) => current + 300);
-    setMessage('Paid pack credited: +300 tokens (dev simulation).');
-  };
-
-  const applyLogFolderPath = () => {
-    const normalized = logFolderInput.trim();
-    if (!normalized) {
-      setMessage('Enter a folder path first.');
-      return;
-    }
-
-    const withSlash = normalized.endsWith('/') ? normalized : `${normalized}/`;
-    setLogFilePath(`${withSlash}alpha-errors.txt`);
-    setMessage(`Log file set to: ${withSlash}alpha-errors.txt`);
-  };
-
-  const pickAndroidFolderPath = async () => {
-    if (Platform.OS !== 'android') {
-      setMessage('Folder picker is currently available on Android only in this alpha build.');
-      return;
-    }
-
-    try {
-      const permission = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
-      if (!permission.granted || !permission.directoryUri) {
-        setMessage('Folder selection cancelled.');
-        return;
-      }
-
-      setLogFolderInput(permission.directoryUri);
-      setLogFilePath(`${permission.directoryUri}/alpha-errors.txt`);
-      setMessage(`Selected folder URI: ${permission.directoryUri}`);
-    } catch (error) {
-      void appendErrorLog(error, 'SelectLogFolder');
-      setMessage('Unable to choose folder path on this device.');
-    }
-  };
-
-  const writeAlphaTestLog = async () => {
-    const testError = new Error('Alpha testing sample error log entry.');
-    await appendErrorLog(testError, 'ManualAlphaTest');
-    setMessage(`Sample error log written to ${logFilePath}`);
-  };
-
-  const changeMode = (mode: GameModeKey) => {
-    if (isPlaying) {
-      setMessage('Finish this run before switching sport mode.');
-      return;
-    }
-
-    setSelectedMode(mode);
-    setMessage(`${GAME_MODES[mode].name} selected.`);
-  };
-
-  const restart = () => {
+  const startGame = (mode: GameModeKey) => {
     tickRef.current = 0;
     rewardedAtGameOverRef.current = false;
-
+    setSelectedMode(mode);
     setPlayerLane(1);
     setObstacles([]);
     setScore(0);
-    setIsPlaying(true);
-    setShields(activeCharacter.shieldBonus);
-    setSlowMotionSeconds(0);
     setMessage('');
+    setSlowMotionSeconds(0);
+    setShields(activeCharacter.shieldBonus);
+    setIsPlaying(true);
+    setScreen('game');
+  };
+
+  const restartGame = () => {
+    tickRef.current = 0;
+    rewardedAtGameOverRef.current = false;
+    setPlayerLane(1);
+    setObstacles([]);
+    setScore(0);
+    setMessage('');
+    setSlowMotionSeconds(0);
+    setShields(activeCharacter.shieldBonus);
+    setIsPlaying(true);
   };
 
   const handleCharacterAction = (character: Character) => {
     const isOwned = ownedCharacters.includes(character.id);
-
     if (isOwned) {
       setSelectedCharacterId(character.id);
       setMessage(`${character.name} equipped.`);
       return;
     }
-
     if (tokens < character.cost) {
-      setMessage(`Not enough tokens for ${character.name}.`);
+      setMessage(`Need ${character.cost - tokens} more tokens for ${character.name}.`);
       return;
     }
-
-    setTokens((current) => current - character.cost);
-    setOwnedCharacters((current) => [...current, character.id]);
+    setTokens((c) => c - character.cost);
+    setOwnedCharacters((c) => [...c, character.id]);
     setSelectedCharacterId(character.id);
-    setMessage(`${character.name} unlocked and equipped.`);
+    setMessage(`${character.name} unlocked and equipped!`);
   };
 
   return (
-    <SafeAreaView style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        <Text style={styles.title}>Retro Rush Festival</Text>
-        <Text style={styles.subtitle}>
-          Surfing, skating, and hackey-inspired arcade challenges with progression.
-        </Text>
-
-        <View style={styles.hudRow}>
-          <Text style={styles.hud}>Mode: {activeMode.name}</Text>
-          <Text style={styles.hud}>Score: {score}</Text>
+    <>
+      {/* ── Character Modal ─────────────────────────────────────────────── */}
+      <Modal
+        visible={showCharacters}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setShowCharacters(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Characters</Text>
+              <Pressable onPress={() => setShowCharacters(false)} style={styles.modalClose}>
+                <Text style={styles.modalCloseText}>✕</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.modalTokens}>Tokens: {tokens}</Text>
+            {message ? (
+              <View style={[styles.messageBanner, { marginHorizontal: 0, marginBottom: 10 }]}>
+                <Text style={styles.messageText}>{message}</Text>
+              </View>
+            ) : null}
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {CHARACTERS.map((char) => {
+                const isOwned = ownedCharacters.includes(char.id);
+                const isSelected = selectedCharacterId === char.id;
+                return (
+                  <Pressable
+                    key={char.id}
+                    onPress={() => handleCharacterAction(char)}
+                    style={[styles.charCard, isSelected && { borderColor: char.color }]}
+                  >
+                    <View style={[styles.charColorBar, { backgroundColor: char.color }]} />
+                    <View style={styles.charCardBody}>
+                      <View style={styles.charCardTop}>
+                        <Text style={styles.charCardName}>{char.name}</Text>
+                        {isOwned ? (
+                          <View
+                            style={[
+                              styles.charBadge,
+                              isSelected ? styles.charBadgeEquipped : styles.charBadgeOwned,
+                            ]}
+                          >
+                            <Text style={styles.charBadgeText}>
+                              {isSelected ? 'Equipped' : 'Owned'}
+                            </Text>
+                          </View>
+                        ) : (
+                          <View style={styles.charBadgeLocked}>
+                            <Text style={styles.charBadgeText}>🔒 {char.cost}</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={styles.charCardDesc}>{char.bonusDescription}</Text>
+                      <Text style={styles.charCardSub}>
+                        🛡 +{char.shieldBonus} shield
+                        {char.slowMotionBonus > 0
+                          ? `   ⏱ +${char.slowMotionBonus}s slow motion`
+                          : ''}
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
         </View>
-        <View style={styles.hudRow}>
-          <Text style={styles.hud}>Best ({activeMode.name}): {bestScores[selectedMode]}</Text>
-          <Text style={styles.hud}>Shields: {shields}</Text>
-        </View>
-        <View style={styles.hudRow}>
-          <Text style={styles.hud}>Tokens: {tokens}</Text>
-          <Text style={styles.hud}>Lifetime: {lifetimeTokens}</Text>
-        </View>
+      </Modal>
 
-        <View style={styles.gameArea}>
-          <View style={styles.laneDivider} />
-          <View style={[styles.laneDivider, styles.secondDivider]} />
+      {/* ── Landing Screen ──────────────────────────────────────────────── */}
+      {screen === 'landing' && (
+        <SafeAreaView style={styles.screen}>
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Hero */}
+            <View style={styles.heroSection}>
+              <Text style={styles.heroEmoji}>🤙</Text>
+              <Text style={styles.heroTitle}>Retro Rush</Text>
+              <Text style={styles.heroTagline}>Pick your sport. Earn your run.</Text>
+              <Text style={styles.heroDesc}>
+                Three extreme sport arcade games — surf, skate, and hackey flow — with
+                characters, tokens, and high scores to chase.
+              </Text>
+            </View>
 
-          {obstacles.map((obstacle) => (
+            {/* Stats bar */}
+            <View style={styles.statsBar}>
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>{tokens}</Text>
+                <Text style={styles.statLabel}>Tokens</Text>
+              </View>
+              <View style={styles.statDivider} />
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>{lifetimeTokens}</Text>
+                <Text style={styles.statLabel}>Lifetime</Text>
+              </View>
+              <View style={styles.statDivider} />
+              <View style={styles.statItem}>
+                <View style={[styles.charDot, { backgroundColor: activeCharacter.color }]} />
+                <Text style={styles.statLabel}>{activeCharacter.name}</Text>
+              </View>
+            </View>
+
+            {/* Primary CTA */}
+            <Pressable
+              onPress={() => setScreen('select')}
+              style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+            >
+              <Text style={styles.primaryBtnText}>Select Game →</Text>
+            </Pressable>
+
+            {/* Characters button */}
+            <Pressable
+              onPress={() => setShowCharacters(true)}
+              style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+            >
+              <Text style={styles.secondaryBtnText}>🎽  Characters & Unlocks</Text>
+            </Pressable>
+
+            {/* Reward ad */}
+            <Pressable
+              onPress={watchRewardAd}
+              style={({ pressed }) => [
+                styles.adBtn,
+                !rewardLoaded && styles.adBtnDisabled,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.adBtnText}>
+                {rewardLoaded
+                  ? '🎬  Watch Ad: +Tokens +Shield +Slow Motion'
+                  : '⏳  Loading Reward Ad…'}
+              </Text>
+            </Pressable>
+
+            {/* Best scores */}
+            <Text style={styles.sectionHeader}>Personal Bests</Text>
+            <View style={styles.bestsRow}>
+              {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => (
+                <View
+                  key={key}
+                  style={[styles.bestCard, { borderColor: GAME_MODES[key].accentColor }]}
+                >
+                  <Text style={styles.bestEmoji}>{GAME_MODES[key].emoji}</Text>
+                  <Text style={[styles.bestScore, { color: GAME_MODES[key].accentColor }]}>
+                    {bestScores[key]}
+                  </Text>
+                  <Text style={styles.bestLabel}>{GAME_MODES[key].name}</Text>
+                </View>
+              ))}
+            </View>
+
+            {message ? (
+              <View style={styles.messageBanner}>
+                <Text style={styles.messageText}>{message}</Text>
+              </View>
+            ) : null}
+          </ScrollView>
+        </SafeAreaView>
+      )}
+
+      {/* ── Select Screen ───────────────────────────────────────────────── */}
+      {screen === 'select' && (
+        <SafeAreaView style={styles.screen}>
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.navRow}>
+              <Pressable onPress={() => setScreen('landing')} style={styles.backBtn}>
+                <Text style={styles.backBtnText}>← Back</Text>
+              </Pressable>
+              <Text style={styles.navTitle}>Choose Your Sport</Text>
+              <View style={{ width: 64 }} />
+            </View>
+
+            {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => {
+              const mode = GAME_MODES[key];
+              return (
+                <Pressable
+                  key={key}
+                  onPress={() => startGame(key)}
+                  style={({ pressed }) => [
+                    styles.modeCard,
+                    { borderColor: mode.accentColor, backgroundColor: mode.dimColor },
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <View style={styles.modeCardTop}>
+                    <Text style={styles.modeEmoji}>{mode.emoji}</Text>
+                    <View style={styles.modeCardInfo}>
+                      <Text style={[styles.modeCardName, { color: mode.accentColor }]}>
+                        {mode.name}
+                      </Text>
+                      <Text style={styles.modeCardDesc}>{mode.description}</Text>
+                    </View>
+                    <View
+                      style={[styles.multiplierBadge, { backgroundColor: mode.accentColor }]}
+                    >
+                      <Text style={styles.multiplierText}>x{mode.tokenMultiplier}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.modeCardBottom}>
+                    <Text style={styles.modeCardRule}>{mode.shortRules}</Text>
+                    <Text style={styles.modeCardBest}>
+                      Best:{' '}
+                      <Text style={{ color: mode.accentColor }}>{bestScores[key]}</Text>
+                    </Text>
+                  </View>
+                  <View style={[styles.startPill, { backgroundColor: mode.accentColor }]}>
+                    <Text style={styles.startPillText}>TAP TO PLAY</Text>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </SafeAreaView>
+      )}
+
+      {/* ── Game Screen ─────────────────────────────────────────────────── */}
+      {screen === 'game' && (
+        <SafeAreaView style={[styles.screen, { backgroundColor: activeMode.dimColor }]}>
+          {/* HUD */}
+          <View style={[styles.gameHud, { borderBottomColor: activeMode.accentColor }]}>
+            <Pressable
+              onPress={() => {
+                if (isPlaying) {
+                  setMessage('Finish your run to exit.');
+                } else {
+                  setScreen('select');
+                }
+              }}
+              style={styles.hudBack}
+            >
+              <Text style={[styles.hudBackText, isPlaying && styles.hudBackDisabled]}>←</Text>
+            </Pressable>
+            <View style={styles.hudCenter}>
+              <Text style={[styles.hudMode, { color: activeMode.accentColor }]}>
+                {activeMode.emoji}  {activeMode.name}
+              </Text>
+            </View>
+            <View style={styles.hudRight}>
+              <Text style={styles.hudStat}>Score {score}</Text>
+              <Text style={styles.hudStat}>🛡 {shields}</Text>
+              {slowMotionSeconds > 0 ? (
+                <Text style={[styles.hudStat, { color: '#FFD700' }]}>⏱ {slowMotionSeconds}s</Text>
+              ) : null}
+            </View>
+          </View>
+
+          {/* Game area */}
+          <View style={styles.gameArea}>
+            <View style={styles.laneDivider} />
+            <View style={[styles.laneDivider, styles.secondDivider]} />
+
+            {obstacles.map((o) => (
+              <View
+                key={o.id}
+                style={[
+                  styles.obstacle,
+                  {
+                    backgroundColor: activeMode.obstacleColor,
+                    left: `${o.lane * (100 / LANE_COUNT) + 7}%` as `${number}%`,
+                    top: `${o.y}%` as `${number}%`,
+                  },
+                ]}
+              />
+            ))}
+
             <View
-              key={obstacle.id}
               style={[
-                styles.obstacle,
+                styles.player,
                 {
-                  backgroundColor: activeMode.obstacleColor,
-                  left: `${obstacle.lane * (100 / LANE_COUNT) + 7}%`,
-                  top: `${obstacle.y}%`,
+                  backgroundColor: activeCharacter.color,
+                  left: `${playerLane * (100 / LANE_COUNT) + 7}%` as `${number}%`,
                 },
               ]}
             />
-          ))}
 
-          <View
-            style={[
-              styles.player,
-              {
-                backgroundColor: activeCharacter.color,
-                left: `${playerLane * (100 / LANE_COUNT) + 7}%`,
-              },
-            ]}
-          />
-        </View>
+            {/* Game Over overlay */}
+            {!isPlaying ? (
+              <View style={styles.gameOverOverlay}>
+                <Text style={styles.gameOverTitle}>Run Over</Text>
+                <Text style={styles.gameOverScore}>{score}</Text>
+                <Text style={styles.gameOverLabel}>score</Text>
+                <Text style={styles.gameOverBest}>Best: {bestScores[selectedMode]}</Text>
+                {message ? (
+                  <Text style={styles.gameOverMsg}>{message}</Text>
+                ) : null}
+                <Pressable
+                  onPress={restartGame}
+                  style={[styles.gameOverBtn, { backgroundColor: activeMode.accentColor }]}
+                >
+                  <Text style={styles.gameOverBtnText}>Play Again</Text>
+                </Pressable>
+                <Pressable onPress={() => setScreen('select')} style={styles.gameOverSecondary}>
+                  <Text style={styles.gameOverSecondaryText}>Change Sport</Text>
+                </Pressable>
+                {rewardLoaded ? (
+                  <Pressable onPress={watchRewardAd} style={styles.gameOverAdBtn}>
+                    <Text style={styles.gameOverAdText}>🎬 Watch Ad for Bonus</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
 
-        <View style={styles.controlsRow}>
-          <Pressable onPress={moveLeft} style={styles.button}>
-            <Text style={styles.buttonText}>◀ Left</Text>
-          </Pressable>
-          <Pressable onPress={moveRight} style={styles.button}>
-            <Text style={styles.buttonText}>Right ▶</Text>
-          </Pressable>
-        </View>
+          {/* In-game message strip */}
+          {isPlaying && message ? (
+            <View
+              style={[
+                styles.inGameMsg,
+                { backgroundColor: activeMode.accentColor + '33' },
+              ]}
+            >
+              <Text style={[styles.inGameMsgText, { color: activeMode.accentColor }]}>
+                {message}
+              </Text>
+            </View>
+          ) : null}
 
-        <View style={styles.controlsRow}>
-          <Pressable onPress={watchRewardAd} style={styles.rewardButton}>
-            <Text style={styles.buttonText}>
-              {rewardLoaded ? 'Watch Ad: +Tokens +Boost' : 'Loading Reward Ad...'}
-            </Text>
-          </Pressable>
-        </View>
-
-        <View style={styles.controlsRow}>
-          <Pressable onPress={simulatePaidTokenPack} style={styles.purchaseButton}>
-            <Text style={styles.buttonText}>Buy Token Pack (+300, dev test)</Text>
-          </Pressable>
-        </View>
-
-        {!isPlaying ? (
-          <Pressable onPress={restart} style={styles.restartButton}>
-            <Text style={styles.restartText}>Run Ended — Tap to Restart</Text>
-          </Pressable>
-        ) : null}
-
-        <Text style={styles.sectionTitle}>Sport Modes (switch between runs)</Text>
-        <View style={styles.modeList}>
-          {(Object.keys(GAME_MODES) as GameModeKey[]).map((mode) => {
-            const isActive = selectedMode === mode;
-
-            return (
+          {/* Controls — large tap zones */}
+          {isPlaying ? (
+            <View style={styles.controlsArea}>
               <Pressable
-                key={mode}
-                onPress={() => changeMode(mode)}
-                style={[styles.modeCard, isActive && styles.modeCardActive]}
+                onPress={moveLeft}
+                style={({ pressed }) => [styles.tapZone, pressed && styles.tapZonePressed]}
               >
-                <Text style={styles.modeName}>{GAME_MODES[mode].name}</Text>
-                <Text style={styles.modeRule}>{GAME_MODES[mode].shortRules}</Text>
-                <Text style={styles.modeRule}>Token multiplier: x{GAME_MODES[mode].tokenMultiplier}</Text>
+                <Text style={styles.tapZoneText}>◀ LEFT</Text>
               </Pressable>
-            );
-          })}
-        </View>
-
-        <Text style={styles.sectionTitle}>Character Customization</Text>
-        <View style={styles.characterList}>
-          {CHARACTERS.map((character) => {
-            const isOwned = ownedCharacters.includes(character.id);
-            const isSelected = selectedCharacterId === character.id;
-
-            return (
               <Pressable
-                key={character.id}
-                onPress={() => handleCharacterAction(character)}
-                style={[styles.characterCard, isSelected && styles.characterCardSelected]}
+                onPress={moveRight}
+                style={({ pressed }) => [styles.tapZone, pressed && styles.tapZonePressed]}
               >
-                <View style={[styles.characterBadge, { backgroundColor: character.color }]} />
-                <View style={styles.characterContent}>
-                  <Text style={styles.characterName}>{character.name}</Text>
-                  <Text style={styles.characterDetails}>Cost: {character.cost} tokens</Text>
-                  <Text style={styles.characterDetails}>{character.bonusDescription}</Text>
-                  <Text style={styles.characterAction}>
-                    {isOwned ? (isSelected ? 'Equipped' : 'Tap to Equip') : 'Tap to Unlock'}
-                  </Text>
-                </View>
+                <Text style={styles.tapZoneText}>RIGHT ▶</Text>
               </Pressable>
-            );
-          })}
-        </View>
-
-        <Text style={styles.sectionTitle}>Alpha Settings: Error Logging</Text>
-        <View style={styles.settingsCard}>
-          <Text style={styles.settingsLabel}>Current log file path (.txt)</Text>
-          <Text style={styles.settingsValue}>{logFilePath}</Text>
-          <Text style={styles.settingsLabel}>Folder path/URI input</Text>
-          <TextInput
-            value={logFolderInput}
-            onChangeText={setLogFolderInput}
-            style={styles.pathInput}
-            placeholder="file:///.../alpha-logs/"
-            placeholderTextColor="#7FA1BE"
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <View style={styles.controlsRow}>
-            <Pressable onPress={applyLogFolderPath} style={styles.button}>
-              <Text style={styles.buttonText}>Apply Folder Path</Text>
-            </Pressable>
-          </View>
-          <View style={styles.controlsRow}>
-            <Pressable onPress={pickAndroidFolderPath} style={styles.button}>
-              <Text style={styles.buttonText}>Choose Folder (Android)</Text>
-            </Pressable>
-            <Pressable onPress={writeAlphaTestLog} style={styles.purchaseButton}>
-              <Text style={styles.buttonText}>Write Test Log</Text>
-            </Pressable>
-          </View>
-          <Text style={styles.settingsHint}>
-            Last write location: {lastLogWritePath}
-          </Text>
-        </View>
-
-        <Pressable onPress={() => setShowInstructions((current) => !current)} style={styles.helpToggle}>
-          <Text style={styles.helpToggleText}>
-            {showInstructions ? 'Hide Instructions' : 'Show Full Instructions'}
-          </Text>
-        </Pressable>
-
-        {showInstructions ? (
-          <View style={styles.instructionsCard}>
-            <Text style={styles.instructionsTitle}>How to Play</Text>
-            <Text style={styles.instructionsText}>1. Pick a sport mode while not in an active run.</Text>
-            <Text style={styles.instructionsText}>2. Use Left/Right to change lanes and avoid obstacles.</Text>
-            <Text style={styles.instructionsText}>3. Survive longer to increase score and token payout.</Text>
-            <Text style={styles.instructionsText}>4. Watch reward ads for tokens and in-run boosts.</Text>
-            <Text style={styles.instructionsText}>5. Unlock/equip stronger characters using tokens.</Text>
-            <Text style={styles.instructionsText}>6. Use paid token pack button for dev monetization flow testing.</Text>
-            <Text style={styles.instructionsText}>7. Configure alpha error log path in Settings and use Write Test Log to verify.</Text>
-            <Text style={styles.instructionsText}>Mode Tip: {activeMode.instruction}</Text>
-            <Text style={styles.instructionsText}>
-              Account Roadmap: Google Sign-In and Apple Sign-In should be added next to sync profile,
-              inventory, and purchases across devices.
-            </Text>
-          </View>
-        ) : null}
-
-        {message ? <Text style={styles.message}>{message}</Text> : null}
-      </ScrollView>
-    </SafeAreaView>
+            </View>
+          ) : null}
+        </SafeAreaView>
+      )}
+    </>
   );
 }
 
@@ -653,43 +729,293 @@ const styles = StyleSheet.create({
     backgroundColor: '#08101E',
   },
   scrollContent: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 24,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 32,
   },
-  title: {
+  pressed: {
+    opacity: 0.75,
+  },
+
+  // ── Landing ──────────────────────────────────────────────────────────────
+  heroSection: {
+    alignItems: 'center',
+    paddingVertical: 28,
+  },
+  heroEmoji: {
+    fontSize: 52,
+    marginBottom: 8,
+  },
+  heroTitle: {
     color: '#E6F7FF',
-    fontSize: 30,
-    fontWeight: '700',
-    textAlign: 'center',
+    fontSize: 40,
+    fontWeight: '800',
+    letterSpacing: 1,
   },
-  subtitle: {
-    color: '#94AEC7',
-    textAlign: 'center',
-    fontSize: 12,
-    marginTop: 4,
-    marginBottom: 10,
+  heroTagline: {
+    color: '#56B0FF',
+    fontSize: 16,
+    fontWeight: '600',
+    marginTop: 6,
+    marginBottom: 12,
   },
-  hudRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 6,
-    gap: 6,
-  },
-  hud: {
-    color: '#CFE1F2',
+  heroDesc: {
+    color: '#7FA8C7',
     fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+    paddingHorizontal: 8,
+  },
+  statsBar: {
+    flexDirection: 'row',
+    backgroundColor: '#0E1E30',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1E3550',
+    paddingVertical: 14,
+    marginBottom: 18,
+    alignItems: 'center',
+    justifyContent: 'space-around',
+  },
+  statItem: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  statValue: {
+    color: '#E6F4FF',
+    fontWeight: '700',
+    fontSize: 18,
+  },
+  statLabel: {
+    color: '#6E97BB',
+    fontSize: 11,
     fontWeight: '600',
   },
-  gameArea: {
-    height: 300,
-    borderRadius: 16,
+  statDivider: {
+    width: 1,
+    height: 32,
+    backgroundColor: '#1E3550',
+  },
+  charDot: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+  },
+  primaryBtn: {
+    backgroundColor: '#56B0FF',
+    borderRadius: 14,
+    paddingVertical: 18,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  primaryBtnText: {
+    color: '#06111E',
+    fontWeight: '800',
+    fontSize: 18,
+    letterSpacing: 0.5,
+  },
+  secondaryBtn: {
+    backgroundColor: '#0E1E30',
     borderWidth: 1,
-    borderColor: '#2D3F55',
-    backgroundColor: '#111D30',
+    borderColor: '#1E3550',
+    borderRadius: 14,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  secondaryBtnText: {
+    color: '#CFE8FF',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  adBtn: {
+    backgroundColor: '#1A3D25',
+    borderWidth: 1,
+    borderColor: '#2E7048',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  adBtnDisabled: {
+    opacity: 0.5,
+  },
+  adBtnText: {
+    color: '#7ED8A0',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  sectionHeader: {
+    color: '#94B8D4',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 10,
+  },
+  bestsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 16,
+  },
+  bestCard: {
+    flex: 1,
+    backgroundColor: '#0E1E30',
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: 'center',
+    paddingVertical: 14,
+    gap: 4,
+  },
+  bestEmoji: {
+    fontSize: 22,
+  },
+  bestScore: {
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  bestLabel: {
+    color: '#5E84A2',
+    fontSize: 10,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+
+  // ── Select Screen ─────────────────────────────────────────────────────────
+  navRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    justifyContent: 'space-between',
+  },
+  backBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    width: 64,
+  },
+  backBtnText: {
+    color: '#7FB4D8',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  navTitle: {
+    color: '#E6F7FF',
+    fontWeight: '800',
+    fontSize: 18,
+  },
+  modeCard: {
+    borderWidth: 1.5,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    gap: 10,
+  },
+  modeCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  modeEmoji: {
+    fontSize: 36,
+  },
+  modeCardInfo: {
+    flex: 1,
+    gap: 3,
+  },
+  modeCardName: {
+    fontWeight: '800',
+    fontSize: 20,
+  },
+  modeCardDesc: {
+    color: '#8AAEC8',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  multiplierBadge: {
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    alignSelf: 'flex-start',
+  },
+  multiplierText: {
+    color: '#06111E',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  modeCardBottom: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  modeCardRule: {
+    color: '#6E97BB',
+    fontSize: 13,
+    flex: 1,
+  },
+  modeCardBest: {
+    color: '#6E97BB',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  startPill: {
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  startPillText: {
+    color: '#06111E',
+    fontWeight: '800',
+    fontSize: 13,
+    letterSpacing: 1,
+  },
+
+  // ── Game Screen ──────────────────────────────────────────────────────────
+  gameHud: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    backgroundColor: '#08101E',
+    gap: 8,
+  },
+  hudBack: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  hudBackText: {
+    color: '#7FB4D8',
+    fontSize: 22,
+    fontWeight: '700',
+  },
+  hudBackDisabled: {
+    opacity: 0.25,
+  },
+  hudCenter: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  hudMode: {
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  hudRight: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  hudStat: {
+    color: '#CFE8FF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  gameArea: {
+    flex: 1,
     position: 'relative',
     overflow: 'hidden',
-    marginVertical: 8,
+    backgroundColor: '#111D30',
   },
   laneDivider: {
     position: 'absolute',
@@ -697,7 +1023,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: 1,
     left: '33.33%',
-    backgroundColor: '#24364A',
+    backgroundColor: '#1E3550',
   },
   secondDivider: {
     left: '66.66%',
@@ -715,184 +1041,232 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     bottom: '8%',
   },
-  controlsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 12,
-    marginBottom: 10,
-  },
-  button: {
-    flex: 1,
-    backgroundColor: '#1E3853',
-    paddingVertical: 12,
-    borderRadius: 10,
+  gameOverOverlay: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(6,10,18,0.92)',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 32,
   },
-  rewardButton: {
-    flex: 1,
-    backgroundColor: '#2A6F43',
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  purchaseButton: {
-    flex: 1,
-    backgroundColor: '#7350B8',
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: '#EAF6FF',
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  restartButton: {
-    backgroundColor: '#7F2A40',
-    paddingVertical: 14,
-    borderRadius: 12,
-    marginBottom: 12,
-  },
-  restartText: {
-    color: '#FFFFFF',
-    textAlign: 'center',
-    fontWeight: '700',
-  },
-  sectionTitle: {
-    color: '#DBEFFF',
+  gameOverTitle: {
+    color: '#94B8D4',
     fontSize: 16,
     fontWeight: '700',
-    marginTop: 8,
-    marginBottom: 6,
+    letterSpacing: 2,
+    textTransform: 'uppercase',
   },
-  modeList: {
-    gap: 8,
-    marginBottom: 10,
+  gameOverScore: {
+    color: '#E6F7FF',
+    fontSize: 64,
+    fontWeight: '800',
+    lineHeight: 72,
   },
-  modeCard: {
-    borderWidth: 1,
-    borderColor: '#34506A',
-    borderRadius: 10,
-    padding: 10,
-    backgroundColor: '#12263B',
-  },
-  modeCardActive: {
-    borderColor: '#6BC0FF',
-  },
-  modeName: {
-    color: '#E9F6FF',
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  modeRule: {
-    color: '#9EC1DF',
-    fontSize: 12,
-  },
-  characterList: {
-    gap: 8,
-  },
-  characterCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#34506A',
-    borderRadius: 10,
-    padding: 10,
-    backgroundColor: '#102133',
-  },
-  characterCardSelected: {
-    borderColor: '#8AE1FF',
-  },
-  characterBadge: {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
-    marginRight: 10,
-  },
-  characterContent: {
-    flex: 1,
-  },
-  characterName: {
-    color: '#EAF7FF',
-    fontWeight: '700',
-    marginBottom: 2,
-  },
-  characterDetails: {
-    color: '#9CB8D0',
-    fontSize: 12,
-  },
-  characterAction: {
-    color: '#9FD3A2',
-    marginTop: 2,
-    fontSize: 12,
+  gameOverLabel: {
+    color: '#5E84A2',
+    fontSize: 13,
     fontWeight: '600',
-  },
-  settingsCard: {
-    borderWidth: 1,
-    borderColor: '#304D66',
-    borderRadius: 10,
-    padding: 10,
-    backgroundColor: '#102032',
-  },
-  settingsLabel: {
-    color: '#CFE8FF',
-    fontWeight: '700',
-    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
     marginBottom: 4,
   },
-  settingsValue: {
-    color: '#9DC4E7',
-    fontSize: 12,
+  gameOverBest: {
+    color: '#7FA8C7',
+    fontSize: 14,
+    marginBottom: 16,
+  },
+  gameOverMsg: {
+    color: '#7ED8A0',
+    fontSize: 13,
+    textAlign: 'center',
     marginBottom: 8,
   },
-  pathInput: {
-    borderWidth: 1,
-    borderColor: '#3C607E',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    color: '#EAF7FF',
-    marginBottom: 8,
-    fontSize: 12,
+  gameOverBtn: {
+    width: '100%',
+    paddingVertical: 16,
+    borderRadius: 14,
+    alignItems: 'center',
+    marginTop: 4,
   },
-  settingsHint: {
-    color: '#8FB2D2',
-    fontSize: 11,
-    marginTop: 2,
+  gameOverBtnText: {
+    color: '#06111E',
+    fontWeight: '800',
+    fontSize: 17,
   },
-  helpToggle: {
-    marginTop: 12,
-    backgroundColor: '#1E3853',
-    borderRadius: 10,
+  gameOverSecondary: {
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  gameOverSecondaryText: {
+    color: '#7FB4D8',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  gameOverAdBtn: {
     paddingVertical: 10,
     alignItems: 'center',
   },
-  helpToggleText: {
-    color: '#EAF6FF',
+  gameOverAdText: {
+    color: '#7ED8A0',
     fontWeight: '700',
+    fontSize: 14,
   },
-  instructionsCard: {
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: '#304D66',
-    borderRadius: 10,
-    padding: 12,
-    backgroundColor: '#102032',
+  inGameMsg: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    alignItems: 'center',
   },
-  instructionsTitle: {
-    color: '#DBF1FF',
+  inGameMsgText: {
     fontWeight: '700',
-    marginBottom: 6,
+    fontSize: 13,
   },
-  instructionsText: {
-    color: '#A4C5DF',
-    fontSize: 12,
+  controlsArea: {
+    flexDirection: 'row',
+    height: 110,
+  },
+  tapZone: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0C1A2A',
+    borderTopWidth: 1,
+    borderColor: '#1E3550',
+  },
+  tapZonePressed: {
+    backgroundColor: '#1A3050',
+  },
+  tapZoneText: {
+    color: '#4A7FA0',
+    fontWeight: '800',
+    fontSize: 20,
+    letterSpacing: 1,
+  },
+
+  // ── Character Modal ───────────────────────────────────────────────────────
+  modalBackdrop: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  modalSheet: {
+    backgroundColor: '#0C1B2C',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 18,
+    paddingBottom: 32,
+    maxHeight: '85%',
+  },
+  modalHandle: {
+    width: 40,
+    height: 4,
+    backgroundColor: '#2A4560',
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginTop: 10,
+    marginBottom: 14,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 4,
   },
-  message: {
-    color: '#9FD3A2',
+  modalTitle: {
+    color: '#E6F7FF',
+    fontWeight: '800',
+    fontSize: 20,
+  },
+  modalClose: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalCloseText: {
+    color: '#5E84A2',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  modalTokens: {
+    color: '#56B0FF',
+    fontWeight: '700',
+    fontSize: 14,
+    marginBottom: 12,
+  },
+  charCard: {
+    flexDirection: 'row',
+    backgroundColor: '#0E1E30',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#1E3550',
+    marginBottom: 10,
+    overflow: 'hidden',
+  },
+  charColorBar: {
+    width: 6,
+  },
+  charCardBody: {
+    flex: 1,
+    padding: 12,
+    gap: 4,
+  },
+  charCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  charCardName: {
+    color: '#E6F7FF',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  charBadge: {
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  charBadgeOwned: {
+    backgroundColor: '#1E3550',
+  },
+  charBadgeEquipped: {
+    backgroundColor: '#1B4D2A',
+  },
+  charBadgeLocked: {
+    backgroundColor: '#2A2A40',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  charBadgeText: {
+    color: '#CFE8FF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  charCardDesc: {
+    color: '#7FA8C7',
+    fontSize: 12,
+  },
+  charCardSub: {
+    color: '#4E7490',
+    fontSize: 12,
+  },
+
+  // ── Shared ────────────────────────────────────────────────────────────────
+  messageBanner: {
+    backgroundColor: '#0E2820',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2E7048',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginHorizontal: 0,
+    marginBottom: 14,
+    alignItems: 'center',
+  },
+  messageText: {
+    color: '#7ED8A0',
+    fontWeight: '700',
+    fontSize: 13,
     textAlign: 'center',
-    marginTop: 10,
-    fontWeight: '600',
   },
 });
