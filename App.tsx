@@ -687,6 +687,7 @@ export default function App() {
 
     const BOX_COLORS = ['#FF4444', '#FF9900', '#CC44FF', '#FF66AA', '#44DDAA'];
     const COLLISION_THRESHOLD = 0.1 - activeCharacter.controlBonus * 0.18;
+    const BOOST_PICKUP_THRESHOLD = 0.1;
 
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
@@ -759,7 +760,7 @@ export default function App() {
         const rx = racerXRef.current;
         const hit = boosts.find((b) => {
           const dx = Math.abs(rx - b.x);
-          return dx < COLLISION_THRESHOLD && b.y > 0.8 && b.y < 0.96;
+          return dx < BOOST_PICKUP_THRESHOLD && b.y > 0.8 && b.y < 0.96;
         });
         if (hit) {
           setScore((c) => c + 30);
@@ -998,7 +999,7 @@ export default function App() {
   // ══════════════════════════════════════════════════════════════════════════
 
   const renderSkillDots = (label: string, value: number, color: string) => (
-    <View key={label} style={styles.skillRow}>
+    <View style={styles.skillRow}>
       <Text style={styles.skillLabel}>{label}</Text>
       <View style={styles.skillDots}>
         {Array.from({ length: 4 }, (_, index) => (
@@ -1065,6 +1066,12 @@ export default function App() {
           <View style={[styles.actionCanopy, { backgroundColor: character.secondaryColor }]} />
           <View style={[styles.actionCanopyLine, styles.actionCanopyLineLeft]} />
           <View style={[styles.actionCanopyLine, styles.actionCanopyLineRight]} />
+        </>
+      ) : pose === 'skate' ? (
+        <>
+          <View style={[styles.actionBoard, { backgroundColor: character.accentColor }]} />
+          <View style={[styles.actionSkateWheel, styles.actionSkateWheelLeft]} />
+          <View style={[styles.actionSkateWheel, styles.actionSkateWheelRight]} />
         </>
       ) : (
         <View
@@ -1407,8 +1414,9 @@ export default function App() {
         ]}
       >
         {renderActionCharacter('race', activeCharacter, {
-          left: '5%',
-          top: '-18%',
+          left: '3%',
+          top: '-6%',
+          transform: [{ scale: 0.82 }],
         })}
       </View>
 
@@ -1926,6 +1934,18 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 999,
   },
+  actionSkateWheel: {
+    position: 'absolute',
+    bottom: 4,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#0D1522',
+    borderWidth: 1,
+    borderColor: '#FFFFFF55',
+  },
+  actionSkateWheelLeft: { left: 12 },
+  actionSkateWheelRight: { right: 12 },
   actionRaceBody: {
     position: 'absolute',
     left: 4,
@@ -2589,14 +2609,13 @@ const styles = StyleSheet.create({
   playerBox: {
     position: 'absolute',
     top: '82%',
-    width: 52,
-    height: 52,
+    width: 60,
+    height: 60,
     borderRadius: 14,
     borderWidth: 3,
     borderColor: '#FFFFFF99',
     alignItems: 'center',
     justifyContent: 'center',
-    overflow: 'hidden',
   },
   playerBoxEmoji: { fontSize: 26 },
   raceHint: {
