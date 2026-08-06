@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
 import {
   AdEventType,
   RewardedAd,
@@ -17,6 +20,8 @@ import {
 const LANE_COUNT = 3;
 const TICK_MS = 120;
 const SLOW_MOTION_BASE_DURATION = 18;
+const DEFAULT_LOG_DIR = `${FileSystem.documentDirectory ?? ''}alpha-logs/`;
+const DEFAULT_LOG_FILE = `${DEFAULT_LOG_DIR}alpha-errors.txt`;
 
 const rewardedAd = RewardedAd.createForAdRequest(TestIds.REWARDED, {
   requestNonPersonalizedAdsOnly: true,
@@ -147,6 +152,9 @@ export default function App() {
   const [rewardLoaded, setRewardLoaded] = useState(false);
   const [message, setMessage] = useState('');
   const [showInstructions, setShowInstructions] = useState(true);
+  const [logFilePath, setLogFilePath] = useState(DEFAULT_LOG_FILE);
+  const [logFolderInput, setLogFolderInput] = useState(DEFAULT_LOG_DIR);
+  const [lastLogWritePath, setLastLogWritePath] = useState(DEFAULT_LOG_FILE);
 
   const activeMode = GAME_MODES[selectedMode];
   const activeCharacter =
@@ -157,9 +165,65 @@ export default function App() {
     [activeMode.baseSpeed, slowMotionSeconds]
   );
 
+  const appendErrorLog = async (error: unknown, context: string) => {
+    try {
+      const printableError =
+        error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error);
+      const logLine = `[${new Date().toISOString()}] [${context}] ${printableError}\n\n`;
+
+      if (logFilePath.startsWith('content://')) {
+        const folderUri = logFilePath.endsWith('/alpha-errors.txt')
+          ? logFilePath.slice(0, -'/alpha-errors.txt'.length)
+          : logFilePath;
+        const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+          folderUri,
+          `alpha-errors-${Date.now()}`,
+          'text/plain'
+        );
+        await FileSystem.writeAsStringAsync(fileUri, logLine, {
+          encoding: FileSystem.EncodingType.UTF8,
+        });
+        setLastLogWritePath(fileUri);
+      } else {
+        const folderPath = logFilePath.replace(/[^/]+$/, '');
+        await FileSystem.makeDirectoryAsync(folderPath, { intermediates: true });
+        await FileSystem.writeAsStringAsync(logFilePath, logLine, {
+          encoding: FileSystem.EncodingType.UTF8,
+          append: true,
+        });
+        setLastLogWritePath(logFilePath);
+      }
+    } catch (logWriteError) {
+      setMessage(`Could not write log file: ${String(logWriteError)}`);
+    }
+  };
+
   useEffect(() => {
     setShields(activeCharacter.shieldBonus);
   }, [activeCharacter.shieldBonus]);
+
+  useEffect(() => {
+    const errorUtils = (
+      globalThis as {
+        ErrorUtils?: {
+          getGlobalHandler?: () => ((error: unknown, isFatal?: boolean) => void) | undefined;
+          setGlobalHandler?: (handler: (error: unknown, isFatal?: boolean) => void) => void;
+        };
+      }
+    ).ErrorUtils;
+    const previousHandler = errorUtils?.getGlobalHandler?.();
+
+    errorUtils?.setGlobalHandler?.((error, isFatal) => {
+      void appendErrorLog(error, isFatal ? 'UnhandledFatal' : 'Unhandled');
+      previousHandler?.(error, isFatal);
+    });
+
+    return () => {
+      if (previousHandler) {
+        errorUtils?.setGlobalHandler?.(previousHandler);
+      }
+    };
+  }, [logFilePath]);
 
   useEffect(() => {
     rewardedAd.load();
@@ -191,6 +255,7 @@ export default function App() {
     const failedUnsubscribe = rewardedAd.addAdEventListener(AdEventType.ERROR, () => {
       setRewardLoaded(false);
       setMessage('Ad unavailable right now. Attempting to load again.');
+      void appendErrorLog('Rewarded ad load/show error event', 'RewardedAd');
       rewardedAd.load();
     });
 
@@ -297,15 +362,60 @@ export default function App() {
       return;
     }
 
-    rewardedAd.show();
-    setRewardLoaded(false);
-    setMessage('Watching rewarded ad...');
+    try {
+      rewardedAd.show();
+      setRewardLoaded(false);
+      setMessage('Watching rewarded ad...');
+    } catch (error) {
+      void appendErrorLog(error, 'WatchRewardAd');
+      setMessage('Unable to show rewarded ad.');
+    }
   };
 
   const simulatePaidTokenPack = () => {
     setTokens((current) => current + 300);
     setLifetimeTokens((current) => current + 300);
     setMessage('Paid pack credited: +300 tokens (dev simulation).');
+  };
+
+  const applyLogFolderPath = () => {
+    const normalized = logFolderInput.trim();
+    if (!normalized) {
+      setMessage('Enter a folder path first.');
+      return;
+    }
+
+    const withSlash = normalized.endsWith('/') ? normalized : `${normalized}/`;
+    setLogFilePath(`${withSlash}alpha-errors.txt`);
+    setMessage(`Log file set to: ${withSlash}alpha-errors.txt`);
+  };
+
+  const pickAndroidFolderPath = async () => {
+    if (Platform.OS !== 'android') {
+      setMessage('Folder picker is currently available on Android only in this alpha build.');
+      return;
+    }
+
+    try {
+      const permission = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+      if (!permission.granted || !permission.directoryUri) {
+        setMessage('Folder selection cancelled.');
+        return;
+      }
+
+      setLogFolderInput(permission.directoryUri);
+      setLogFilePath(`${permission.directoryUri}/alpha-errors.txt`);
+      setMessage(`Selected folder URI: ${permission.directoryUri}`);
+    } catch (error) {
+      void appendErrorLog(error, 'SelectLogFolder');
+      setMessage('Unable to choose folder path on this device.');
+    }
+  };
+
+  const writeAlphaTestLog = async () => {
+    const testError = new Error('Alpha testing sample error log entry.');
+    await appendErrorLog(testError, 'ManualAlphaTest');
+    setMessage(`Sample error log written to ${logFilePath}`);
   };
 
   const changeMode = (mode: GameModeKey) => {
@@ -475,6 +585,38 @@ export default function App() {
           })}
         </View>
 
+        <Text style={styles.sectionTitle}>Alpha Settings: Error Logging</Text>
+        <View style={styles.settingsCard}>
+          <Text style={styles.settingsLabel}>Current log file path (.txt)</Text>
+          <Text style={styles.settingsValue}>{logFilePath}</Text>
+          <Text style={styles.settingsLabel}>Folder path/URI input</Text>
+          <TextInput
+            value={logFolderInput}
+            onChangeText={setLogFolderInput}
+            style={styles.pathInput}
+            placeholder="file:///.../alpha-logs/"
+            placeholderTextColor="#7FA1BE"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <View style={styles.controlsRow}>
+            <Pressable onPress={applyLogFolderPath} style={styles.button}>
+              <Text style={styles.buttonText}>Apply Folder Path</Text>
+            </Pressable>
+          </View>
+          <View style={styles.controlsRow}>
+            <Pressable onPress={pickAndroidFolderPath} style={styles.button}>
+              <Text style={styles.buttonText}>Choose Folder (Android)</Text>
+            </Pressable>
+            <Pressable onPress={writeAlphaTestLog} style={styles.purchaseButton}>
+              <Text style={styles.buttonText}>Write Test Log</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.settingsHint}>
+            Last write location: {lastLogWritePath}
+          </Text>
+        </View>
+
         <Pressable onPress={() => setShowInstructions((current) => !current)} style={styles.helpToggle}>
           <Text style={styles.helpToggleText}>
             {showInstructions ? 'Hide Instructions' : 'Show Full Instructions'}
@@ -490,6 +632,7 @@ export default function App() {
             <Text style={styles.instructionsText}>4. Watch reward ads for tokens and in-run boosts.</Text>
             <Text style={styles.instructionsText}>5. Unlock/equip stronger characters using tokens.</Text>
             <Text style={styles.instructionsText}>6. Use paid token pack button for dev monetization flow testing.</Text>
+            <Text style={styles.instructionsText}>7. Configure alpha error log path in Settings and use Write Test Log to verify.</Text>
             <Text style={styles.instructionsText}>Mode Tip: {activeMode.instruction}</Text>
             <Text style={styles.instructionsText}>
               Account Roadmap: Google Sign-In and Apple Sign-In should be added next to sync profile,
@@ -683,6 +826,39 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 12,
     fontWeight: '600',
+  },
+  settingsCard: {
+    borderWidth: 1,
+    borderColor: '#304D66',
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: '#102032',
+  },
+  settingsLabel: {
+    color: '#CFE8FF',
+    fontWeight: '700',
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  settingsValue: {
+    color: '#9DC4E7',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  pathInput: {
+    borderWidth: 1,
+    borderColor: '#3C607E',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    color: '#EAF7FF',
+    marginBottom: 8,
+    fontSize: 12,
+  },
+  settingsHint: {
+    color: '#8FB2D2',
+    fontSize: 11,
+    marginTop: 2,
   },
   helpToggle: {
     marginTop: 12,

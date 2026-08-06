@@ -22,6 +22,9 @@ It is inspired by classic multi-sport arcade collections (surfing/skating/hackey
   - Configured with Google test IDs for safe development
 - **Full in-app instructions panel**
   - Core controls, progression flow, mode-specific guidance, and account roadmap note
+- **Alpha error logging settings**
+  - Runtime error logs appended to on-device `.txt` file
+  - Configurable path/URI from in-app settings screen
 
 ## Full gameplay instructions
 
@@ -61,6 +64,22 @@ It is inspired by classic multi-sport arcade collections (surfing/skating/hackey
 - For production, replace this with real in-app purchases:
   - Google Play Billing (Android)
   - StoreKit (iOS)
+
+## Alpha testing error logs (.txt)
+
+- Open **Alpha Settings: Error Logging** in-app.
+- Current default log path:
+  - `file:///.../alpha-logs/alpha-errors.txt` (app documents directory)
+- You can:
+  - manually enter a folder path/URI and tap **Apply Folder Path**
+  - choose an Android folder URI via **Choose Folder (Android)**
+  - tap **Write Test Log** to verify file output immediately
+
+### Notes / current limitations
+
+- Android folder picker may return `content://` URIs; logs are written as SAF text files.
+- iOS folder picker is not included in this alpha build; use manual path input or default path.
+- This logging path flow is for alpha debugging and can be replaced before beta/end-user testing.
 
 ## User accounts roadmap (Google/Apple)
 
