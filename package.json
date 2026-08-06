@@ -4,12 +4,12 @@
   "main": "index.ts",
   "dependencies": {
     "expo": "~57.0.10",
-    "expo-build-properties": "^57.0.8",
+    "expo-build-properties": "57.0.8",
     "expo-file-system": "~57.0.1",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
     "react-native": "0.86.2",
-    "react-native-google-mobile-ads": "^16.4.0"
+    "react-native-google-mobile-ads": "16.0.3"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
@@ -21,6 +21,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "validate:android-toolchain": "node ./scripts/validate-android-toolchain.mjs",
     "build:android:preview": "npx eas-cli@latest build --platform android --profile preview",
     "build:ios:preview": "npx eas-cli@latest build --platform ios --profile preview"
   },

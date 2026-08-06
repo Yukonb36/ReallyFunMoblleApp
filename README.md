@@ -116,6 +116,30 @@ Next recommended implementation phase:
 npm run typecheck
 ```
 
+## Android build compatibility (pinned)
+
+The Android pipeline uses a pinned toolchain to avoid Kotlin metadata mismatch regressions.
+
+| Layer | Pinned value |
+| --- | --- |
+| Expo SDK | `~57.0.10` |
+| `expo-build-properties` | `57.0.8` |
+| Kotlin (via `expo-build-properties`) | `2.1.20` |
+| `react-native-google-mobile-ads` | `16.0.3` |
+| Generated Gradle wrapper (`expo prebuild`) | `9.3.1` |
+
+Preflight check:
+
+```bash
+npm run validate:android-toolchain
+```
+
+Safe upgrade workflow:
+1. Update toolchain versions intentionally (do not use `^` for these pinned Android deps).
+2. Run `npx expo prebuild --platform android --clean`.
+3. Run `npm run validate:android-toolchain`.
+4. Run Android build (`cd android && ./gradlew assembleDebug`) before merging.
+
 ## SDK-style downloadable internal test builds
 
 This repository includes `eas.json` build profiles for installable testing artifacts.
