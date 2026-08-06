@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
+  Dimensions,
   Modal,
+  PanResponder,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -16,37 +19,29 @@ import {
   TestIds,
 } from 'react-native-google-mobile-ads';
 
-const LANE_COUNT = 3;
-const TICK_MS = 120;
+// ─── Constants ────────────────────────────────────────────────────────────────
+const TICK_MS = 50; // ~20 fps game tick
 const SLOW_MOTION_BASE_DURATION = 18;
 const DEFAULT_LOG_DIR = `${FileSystem.documentDirectory ?? ''}alpha-logs/`;
 const DEFAULT_LOG_FILE = `${DEFAULT_LOG_DIR}alpha-errors.txt`;
+const { width: SCREEN_W } = Dimensions.get('window');
 
 const rewardedAd = RewardedAd.createForAdRequest(TestIds.REWARDED, {
   requestNonPersonalizedAdsOnly: true,
 });
 
+// ─── Types ────────────────────────────────────────────────────────────────────
 type ScreenKey = 'landing' | 'select' | 'game';
-type GameModeKey = 'surf' | 'skate' | 'hackey';
+type GameModeKey = 'surf' | 'skate' | 'hackey' | 'skydive' | 'boxrace';
 
 type GameMode = {
   name: string;
   emoji: string;
   shortRules: string;
   description: string;
-  instruction: string;
   tokenMultiplier: number;
-  spawnEveryTicks: number;
-  baseSpeed: number;
-  obstacleColor: string;
   accentColor: string;
   dimColor: string;
-};
-
-type Obstacle = {
-  id: number;
-  lane: number;
-  y: number;
 };
 
 type Character = {
@@ -59,48 +54,68 @@ type Character = {
   bonusDescription: string;
 };
 
+// ── Surf game state ───
+type WaveZone = { id: number; x: number; width: number }; // x: 0-1, width: 0-1
+
+// ── Skate game state ──
+// angle: radians, 0 = bottom of pipe, +/- PI/2 = top of wall
+type SkateRail = { id: number; side: 'left' | 'right'; active: boolean };
+
+// ── Hackey game state ─
+type HackeyPlayer = { id: number; angle: number }; // angle in circle (radians)
+
+// ── Skydive game state ─
+type SkyGate = { id: number; y: number; gapX: number }; // y: 0-1 falling, gapX: 0-1 center of gap
+type SkyCloud = { id: number; x: number; y: number; r: number }; // turbulence puff
+
+// ── Box Race game state ─
+type RaceBox = { id: number; x: number; y: number; speed: number; color: string };
+
 const GAME_MODES: Record<GameModeKey, GameMode> = {
   surf: {
-    name: 'Surf Sprint',
+    name: 'Surf Ride',
     emoji: '🏄',
-    shortRules: 'Ride wave lanes and dodge reef spikes.',
-    description: 'Catch the swell and outrun the reef. Steady rhythm, medium speed.',
-    instruction:
-      'Tap Left/Right to switch lanes and avoid reef spikes. Surf mode has steady wave rhythm and medium speed.',
+    shortRules: 'Drag to ride the wave face. Flick up for aerials!',
+    description: 'Ride the wave face. Dodge whitewater closeouts, pull aerials in the sweet zone.',
     tokenMultiplier: 2,
-    spawnEveryTicks: 8,
-    baseSpeed: 4.8,
-    obstacleColor: '#2E7ACD',
     accentColor: '#56B0FF',
     dimColor: '#0D2A45',
   },
   skate: {
-    name: 'Skate Rush',
+    name: 'Half Pipe',
     emoji: '🛹',
-    shortRules: 'Street sprint with fast barriers.',
-    description: 'Fastest mode. Quick lane switches to dodge rails and benches.',
-    instruction:
-      'Skate mode is the fastest. Keep quick lane changes to avoid rails and benches with shorter reaction windows.',
+    shortRules: 'Swipe left/right to pump. Go airborne for tricks!',
+    description: 'Pump up the half pipe walls. Launch off the coping and pull tricks in the air.',
     tokenMultiplier: 3,
-    spawnEveryTicks: 7,
-    baseSpeed: 5.8,
-    obstacleColor: '#B94A48',
     accentColor: '#FF6B6B',
     dimColor: '#330D0D',
   },
   hackey: {
-    name: 'Hackey Flow',
+    name: 'Hackey Circle',
     emoji: '🤸',
-    shortRules: 'Rhythm dodge with surprise cones.',
-    description: 'Unpredictable spawns. Stay centered and react fast.',
-    instruction:
-      'Hackey mode has unpredictable spawn rhythms. Stay centered when possible and react to sudden cone patterns.',
+    shortRules: 'Tap the glowing player before the sack drops!',
+    description: 'Keep the hacky sack alive. Tap the active player in time — chains build combos.',
     tokenMultiplier: 4,
-    spawnEveryTicks: 6,
-    baseSpeed: 5.2,
-    obstacleColor: '#7A5BC8',
     accentColor: '#A07AFF',
     dimColor: '#1A0D33',
+  },
+  skydive: {
+    name: 'Skydive',
+    emoji: '🪂',
+    shortRules: 'Drag to steer through gates. Dodge turbulence clouds!',
+    description: 'Free-fall at terminal velocity. Thread the cloud gates and avoid turbulence to survive.',
+    tokenMultiplier: 5,
+    accentColor: '#00E5C8',
+    dimColor: '#071A2E',
+  },
+  boxrace: {
+    name: 'Box Racer',
+    emoji: '📦',
+    shortRules: 'Swipe to steer. Ram rivals, dodge walls!',
+    description: 'Top-down karting in a box car. Smash rival boxes, hit boosts, and stay on the track.',
+    tokenMultiplier: 3,
+    accentColor: '#FFB830',
+    dimColor: '#1A1000',
   },
 };
 
@@ -143,44 +158,93 @@ const CHARACTERS: Character[] = [
   },
 ];
 
-export default function App() {
-  const tickRef = useRef(0);
-  const rewardedAtGameOverRef = useRef(false);
+// ─── Helper ───────────────────────────────────────────────────────────────────
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
+// ─── App ──────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [logFilePath] = useState(DEFAULT_LOG_FILE);
+
+  // ── navigation / meta ─────────────────────────────────────────────────────
   const [screen, setScreen] = useState<ScreenKey>('landing');
   const [selectedMode, setSelectedMode] = useState<GameModeKey>('surf');
-  const [playerLane, setPlayerLane] = useState(1);
-  const [obstacles, setObstacles] = useState<Obstacle[]>([]);
   const [score, setScore] = useState(0);
   const [bestScores, setBestScores] = useState<Record<GameModeKey, number>>({
-    surf: 0,
-    skate: 0,
-    hackey: 0,
+    surf: 0, skate: 0, hackey: 0, skydive: 0, boxrace: 0,
   });
   const [isPlaying, setIsPlaying] = useState(false);
 
+  // ── economy ───────────────────────────────────────────────────────────────
   const [tokens, setTokens] = useState(0);
   const [lifetimeTokens, setLifetimeTokens] = useState(0);
   const [ownedCharacters, setOwnedCharacters] = useState<string[]>(['rookie']);
   const [selectedCharacterId, setSelectedCharacterId] = useState('rookie');
-
   const [shields, setShields] = useState(1);
   const [slowMotionSeconds, setSlowMotionSeconds] = useState(0);
   const [rewardLoaded, setRewardLoaded] = useState(false);
   const [message, setMessage] = useState('');
   const [showCharacters, setShowCharacters] = useState(false);
-  const [logFilePath] = useState(DEFAULT_LOG_FILE);
+
+  // ── refs ──────────────────────────────────────────────────────────────────
+  const tickRef = useRef(0);
+  const rewardedAtGameOverRef = useRef(false);
+  const isPlayingRef = useRef(false);
+
+  // ── Surf state ────────────────────────────────────────────────────────────
+  const [surferX, setSurferX] = useState(0.5);          // 0-1 across wave face
+  const [waveZones, setWaveZones] = useState<WaveZone[]>([]); // danger whitewater
+  const [trickAirborne, setTrickAirborne] = useState(false);
+  const [tubeMultiplier, setTubeMultiplier] = useState(1);
+  const surferXRef = useRef(0.5);
+  const surfWavePhase = useRef(0); // for sinusoidal wave anim
+  const surfAnimVal = useRef(new Animated.Value(0)).current;
+
+  // ── Skate state ───────────────────────────────────────────────────────────
+  const [skateAngle, setSkateAngle] = useState(0);       // radians: 0=bottom
+  const [skateAirborne, setSkateAirborne] = useState(false);
+  const [skateSpeed, setSkateSpeed] = useState(0);        // angular velocity
+  const [skateTrick, setSkateTrick] = useState<string | null>(null);
+  const [skateRails, setSkateRails] = useState<SkateRail[]>([]);
+  const skateAngleRef = useRef(0);
+  const skateSpeedRef = useRef(0);
+  const skateAirborneRef = useRef(false);
+  const skateTrickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Hackey state ──────────────────────────────────────────────────────────
+  const HACKEY_PLAYERS = useMemo<HackeyPlayer[]>(() =>
+    Array.from({ length: 6 }, (_, i) => ({
+      id: i,
+      angle: (i * Math.PI * 2) / 6,
+    })), []);
+  const [hackeyTarget, setHackeyTarget] = useState(0);   // player id
+  const [hackeyWindow, setHackeyWindow] = useState(1);   // 0-1 shrinking
+  const [hackeyMisses, setHackeyMisses] = useState(0);
+  const [hackeyCombo, setHackeyCombo] = useState(0);
+  const [hackeySackPos, setHackeySackPos] = useState({ x: 0.5, y: 0.5 });
+  const hackeyWindowRef = useRef(1);
+  const hackeyTargetRef = useRef(0);
+  const hackeyMissesRef = useRef(0);
+
+  // ── Skydive state ─────────────────────────────────────────────────────────
+  const [skyX, setSkyX] = useState(0.5);                   // 0-1 horizontal
+  const [skyGates, setSkyGates] = useState<SkyGate[]>([]);  // ring-gates to thread
+  const [skyClouds, setSkyClouds] = useState<SkyCloud[]>([]); // turbulence pockets
+  const [skyAltitude, setSkyAltitude] = useState(10000);    // display altitude ft
+  const [skyGatesCleared, setSkyGatesCleared] = useState(0);
+  const skyXRef = useRef(0.5);
+
+  // ── Box Race state ────────────────────────────────────────────────────────
+  const [racerX, setRacerX] = useState(0.5);               // 0-1 track position
+  const [raceBoxes, setRaceBoxes] = useState<RaceBox[]>([]);
+  const [raceBoosts, setRaceBoosts] = useState<{ id: number; x: number; y: number }[]>([]);
+  const [racerSpeed, setRacerSpeed] = useState(0);
+  const racerXRef = useRef(0.5);
 
   const activeMode = GAME_MODES[selectedMode];
-  const activeCharacter =
-    CHARACTERS.find((c) => c.id === selectedCharacterId) ?? CHARACTERS[0];
+  const activeCharacter = CHARACTERS.find((c) => c.id === selectedCharacterId) ?? CHARACTERS[0];
 
-  const obstacleSpeed = useMemo(
-    () => (slowMotionSeconds > 0 ? activeMode.baseSpeed * 0.6 : activeMode.baseSpeed),
-    [activeMode.baseSpeed, slowMotionSeconds]
-  );
-
-  const appendErrorLog = async (error: unknown, context: string) => {
+  // ─── Error logging ────────────────────────────────────────────────────────
+  const appendErrorLog = useCallback(async (error: unknown, context: string) => {
     try {
       const printableError =
         error instanceof Error
@@ -194,9 +258,9 @@ export default function App() {
         append: true,
       });
     } catch {
-      // silently swallow log errors in production UI
+      // silently swallow
     }
-  };
+  }, [logFilePath]);
 
   useEffect(() => {
     const errorUtils = (
@@ -213,24 +277,17 @@ export default function App() {
       previousHandler?.(error, isFatal);
     });
     return () => {
-      if (previousHandler) {
-        errorUtils?.setGlobalHandler?.(previousHandler);
-      }
+      if (previousHandler) errorUtils?.setGlobalHandler?.(previousHandler);
     };
-  }, [logFilePath]);
+  }, [appendErrorLog]);
 
-  // Only reset shields when not in an active run, to avoid mid-game disruption
   useEffect(() => {
-    if (!isPlaying) {
-      setShields(activeCharacter.shieldBonus);
-    }
+    if (!isPlaying) setShields(activeCharacter.shieldBonus);
   }, [activeCharacter.shieldBonus, isPlaying]);
 
   useEffect(() => {
     rewardedAd.load();
-    const loadedUnsub = rewardedAd.addAdEventListener(RewardedAdEventType.LOADED, () => {
-      setRewardLoaded(true);
-    });
+    const loadedUnsub = rewardedAd.addAdEventListener(RewardedAdEventType.LOADED, () => setRewardLoaded(true));
     const earnedUnsub = rewardedAd.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => {
       const bonusDuration = SLOW_MOTION_BASE_DURATION + activeCharacter.slowMotionBonus;
       setTokens((c) => c + 40);
@@ -247,58 +304,10 @@ export default function App() {
       setRewardLoaded(false);
       rewardedAd.load();
     });
-    return () => {
-      loadedUnsub();
-      earnedUnsub();
-      closedUnsub();
-      failedUnsub();
-    };
+    return () => { loadedUnsub(); earnedUnsub(); closedUnsub(); failedUnsub(); };
   }, [activeCharacter.slowMotionBonus]);
 
-  useEffect(() => {
-    if (!isPlaying) return;
-    const interval = setInterval(() => {
-      tickRef.current += 1;
-      setScore((c) => c + 1);
-      setObstacles((current) => {
-        const moved = current
-          .map((o) => ({ ...o, y: o.y + obstacleSpeed }))
-          .filter((o) => o.y < 100);
-        if (tickRef.current % activeMode.spawnEveryTicks === 0) {
-          moved.push({
-            id: Date.now() + Math.random(),
-            lane: Math.floor(Math.random() * LANE_COUNT),
-            y: 0,
-          });
-        }
-        return moved;
-      });
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
-        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
-      }
-    }, TICK_MS);
-    return () => clearInterval(interval);
-  }, [activeMode.spawnEveryTicks, isPlaying, obstacleSpeed, slowMotionSeconds]);
-
-  useEffect(() => {
-    if (!isPlaying) return;
-    const hit = obstacles.find(
-      (o) => o.lane === playerLane && o.y > 76 && o.y < 94
-    );
-    if (!hit) return;
-    if (shields > 0) {
-      setShields((c) => c - 1);
-      setObstacles((c) => c.filter((o) => o.id !== hit.id));
-      setMessage('Shield absorbed the impact!');
-      return;
-    }
-    setIsPlaying(false);
-    setBestScores((c) => ({
-      ...c,
-      [selectedMode]: Math.max(c[selectedMode], score),
-    }));
-  }, [isPlaying, obstacles, playerLane, score, selectedMode, shields]);
-
+  // ─── Payout on game over ──────────────────────────────────────────────────
   useEffect(() => {
     if (isPlaying || rewardedAtGameOverRef.current) return;
     rewardedAtGameOverRef.current = true;
@@ -308,17 +317,582 @@ export default function App() {
     setMessage(`Run complete! +${runPayout} tokens from ${activeMode.name}.`);
   }, [activeMode.name, activeMode.tokenMultiplier, isPlaying, score]);
 
-  const moveLeft = () => {
-    if (!isPlaying) return;
-    setPlayerLane((c) => Math.max(0, c - 1));
-  };
+  // ─── Sync refs ────────────────────────────────────────────────────────────
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  useEffect(() => { skateAngleRef.current = skateAngle; }, [skateAngle]);
+  useEffect(() => { skateSpeedRef.current = skateSpeed; }, [skateSpeed]);
+  useEffect(() => { skateAirborneRef.current = skateAirborne; }, [skateAirborne]);
+  useEffect(() => { hackeyWindowRef.current = hackeyWindow; }, [hackeyWindow]);
+  useEffect(() => { hackeyTargetRef.current = hackeyTarget; }, [hackeyTarget]);
+  useEffect(() => { hackeyMissesRef.current = hackeyMisses; }, [hackeyMisses]);
+  useEffect(() => { skyXRef.current = skyX; }, [skyX]);
+  useEffect(() => { racerXRef.current = racerX; }, [racerX]);
+  // ══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!isPlaying || selectedMode !== 'surf') return;
 
-  const moveRight = () => {
-    if (!isPlaying) return;
-    setPlayerLane((c) => Math.min(LANE_COUNT - 1, c + 1));
-  };
+    const interval = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      tickRef.current += 1;
 
-  const watchRewardAd = () => {
+      // Score tick
+      setScore((c) => c + tubeMultiplier);
+
+      // Slow motion countdown (every ~8 ticks ≈ 400ms)
+      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
+      }
+
+      const speed = slowMotionSeconds > 0 ? 0.006 : 0.012;
+
+      // Move / spawn whitewater zones
+      setWaveZones((current) => {
+        const moved = current
+          .map((z) => ({ ...z, x: z.x - speed }))
+          .filter((z) => z.x + z.width > 0);
+        // Spawn new zone roughly every 3-4 seconds
+        if (tickRef.current % (slowMotionSeconds > 0 ? 120 : 60) === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            x: 1.0,
+            width: 0.12 + Math.random() * 0.14,
+          });
+        }
+        return moved;
+      });
+
+      // Wave animation phase
+      surfWavePhase.current += 0.04;
+
+      // Check collision: surfer at surferXRef.current hits a zone?
+      setWaveZones((zones) => {
+        const hit = zones.find((z) => {
+          const sx = surferXRef.current;
+          return sx > z.x && sx < z.x + z.width;
+        });
+        if (hit && !trickAirborne) {
+          if (shields > 0) {
+            setShields((c) => c - 1);
+            setMessage('Whitewater! Shield absorbed it!');
+            return zones.filter((z) => z.id !== hit.id);
+          }
+          // Wipeout
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          setBestScores((c) => ({ ...c, surf: Math.max(c.surf, score) }));
+        }
+        return zones;
+      });
+
+      // Sweet zone: surfer within 0.35-0.65
+      const inSweet = surferXRef.current > 0.35 && surferXRef.current < 0.65;
+      setTubeMultiplier(inSweet ? 2 : 1);
+    }, TICK_MS);
+
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, selectedMode, slowMotionSeconds, shields, trickAirborne, score]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SKATE GAME LOOP
+  // ══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!isPlaying || selectedMode !== 'skate') return;
+
+    const GRAVITY = 0.008; // radians/tick² pulling toward 0
+    const FRICTION = 0.995;
+    const PIPE_RADIUS = Math.PI * 0.45; // max angle before launch
+    const TRICK_NAMES = ['Grab', '180°', '360°', 'McTwist'];
+
+    const interval = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      tickRef.current += 1;
+      setScore((c) => c + 1);
+
+      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
+      }
+
+      const curAngle = skateAngleRef.current;
+      const curSpeed = skateSpeedRef.current;
+      const airborne = skateAirborneRef.current;
+
+      if (airborne) {
+        // Simple ballistic arc: gravity pulls angle back toward 0
+        const newSpeed = curSpeed - GRAVITY * Math.sign(curAngle) * (slowMotionSeconds > 0 ? 0.5 : 1);
+        const newAngle = curAngle + newSpeed * (slowMotionSeconds > 0 ? 0.5 : 1);
+        skateSpeedRef.current = newSpeed;
+        skateAngleRef.current = newAngle;
+        setSkateSpeed(newSpeed);
+        setSkateAngle(newAngle);
+
+        // Land when angle crosses 0
+        if (Math.abs(newAngle) < 0.05 && Math.abs(newSpeed) < 0.03) {
+          skateAirborneRef.current = false;
+          setSkateAirborne(false);
+          setMessage(`Landed! +${50 * activeCharacter.shieldBonus} pts`);
+          setScore((c) => c + 50 * activeCharacter.shieldBonus);
+        }
+      } else {
+        // In-pipe physics: gravity toward bottom
+        const newSpeed = (curSpeed - GRAVITY * Math.sin(curAngle) * (slowMotionSeconds > 0 ? 0.5 : 1)) * FRICTION;
+        const newAngle = curAngle + newSpeed * (slowMotionSeconds > 0 ? 0.5 : 1);
+        skateSpeedRef.current = newSpeed;
+        skateAngleRef.current = newAngle;
+        setSkateSpeed(newSpeed);
+        setSkateAngle(newAngle);
+
+        // Launch off coping
+        if (Math.abs(newAngle) > PIPE_RADIUS) {
+          skateAirborneRef.current = true;
+          setSkateAirborne(true);
+          const trick = TRICK_NAMES[Math.floor(Math.random() * TRICK_NAMES.length)];
+          setSkateTrick(trick);
+          setMessage(`Airborne! Tap for ${trick}!`);
+          if (skateTrickTimeoutRef.current) clearTimeout(skateTrickTimeoutRef.current);
+          skateTrickTimeoutRef.current = setTimeout(() => setSkateTrick(null), 2000);
+          // Spawn rail sometimes
+          if (Math.random() > 0.5) {
+            setSkateRails((r) => [
+              ...r.slice(-2),
+              { id: Date.now(), side: newAngle > 0 ? 'right' : 'left', active: true },
+            ]);
+          }
+        }
+      }
+
+      // Rail timeout
+      setSkateRails((r) =>
+        r.map((rail) => ({ ...rail })).filter((_, i) => i > r.length - 4),
+      );
+    }, TICK_MS);
+
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, selectedMode, slowMotionSeconds, activeCharacter.shieldBonus]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  HACKEY GAME LOOP
+  // ══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!isPlaying || selectedMode !== 'hackey') return;
+
+    const BASE_WINDOW_DRAIN = 0.018; // per tick
+
+    const interval = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      tickRef.current += 1;
+
+      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
+      }
+
+      const drain = (slowMotionSeconds > 0 ? 0.5 : 1) * BASE_WINDOW_DRAIN *
+        (1 + hackeyCombo * 0.03); // gets faster with combo
+      const newWindow = hackeyWindowRef.current - drain;
+
+      if (newWindow <= 0) {
+        // Missed! 
+        const newMisses = hackeyMissesRef.current + 1;
+        hackeyMissesRef.current = newMisses;
+        setHackeyMisses(newMisses);
+        setHackeyCombo(0);
+        setMessage(`Miss! ${3 - newMisses} chances left`);
+
+        if (newMisses >= 3) {
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          setBestScores((c) => ({ ...c, hackey: Math.max(c.hackey, score) }));
+          return;
+        }
+
+        // Next target
+        const nextTarget = Math.floor(Math.random() * 6);
+        hackeyTargetRef.current = nextTarget;
+        hackeyWindowRef.current = 1;
+        setHackeyTarget(nextTarget);
+        setHackeyWindow(1);
+      } else {
+        hackeyWindowRef.current = newWindow;
+        setHackeyWindow(newWindow);
+        setScore((c) => c + 1);
+      }
+
+      // Animate sack position toward target player
+      const targetPlayer = HACKEY_PLAYERS[hackeyTargetRef.current];
+      const cx = 0.5 + Math.cos(targetPlayer.angle) * 0.35;
+      const cy = 0.5 + Math.sin(targetPlayer.angle) * 0.35;
+      setHackeySackPos((prev) => ({
+        x: prev.x + (cx - prev.x) * 0.1,
+        y: prev.y + (cy - prev.y) * 0.1,
+      }));
+    }, TICK_MS);
+
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, selectedMode, slowMotionSeconds, hackeyCombo, score, HACKEY_PLAYERS]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SKYDIVE GAME LOOP
+  // ══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!isPlaying || selectedMode !== 'skydive') return;
+
+    const GATE_GAP = 0.28; // fraction of width that is "safe" in each gate
+
+    const interval = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      tickRef.current += 1;
+      setScore((c) => c + 1);
+
+      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
+      }
+
+      const speed = slowMotionSeconds > 0 ? 0.008 : 0.016;
+
+      // Descend altitude
+      setSkyAltitude((a) => Math.max(0, a - 50));
+
+      // Move gates down the screen and spawn new ones
+      setSkyGates((gates) => {
+        const moved = gates
+          .map((g) => ({ ...g, y: g.y + speed }))
+          .filter((g) => g.y < 1.15);
+        if (tickRef.current % 55 === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            y: -0.1,
+            gapX: 0.1 + Math.random() * 0.6,
+          });
+        }
+        return moved;
+      });
+
+      // Move clouds
+      setSkyClouds((clouds) => {
+        const moved = clouds
+          .map((c) => ({ ...c, y: c.y + speed * 0.5 }))
+          .filter((c) => c.y < 1.1);
+        if (tickRef.current % 30 === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            x: Math.random(),
+            y: -0.05,
+            r: 0.07 + Math.random() * 0.08,
+          });
+        }
+        return moved;
+      });
+
+      // Collision checks
+      setSkyGates((gates) => {
+        const sx = skyXRef.current;
+        const hit = gates.find((g) => {
+          // Gate is at y ~0.8 (near player who is at 0.82)
+          if (g.y < 0.76 || g.y > 0.88) return false;
+          const leftWall = g.gapX - GATE_GAP / 2;
+          const rightWall = g.gapX + GATE_GAP / 2;
+          return sx < leftWall || sx > rightWall;
+        });
+        const cleared = gates.find((g) => g.y > 0.76 && g.y < 0.88 &&
+          sx >= g.gapX - GATE_GAP / 2 && sx <= g.gapX + GATE_GAP / 2);
+        if (cleared) {
+          setSkyGatesCleared((c) => c + 1);
+          setScore((c) => c + 25);
+        }
+        if (hit) {
+          if (shields > 0) {
+            setShields((s) => s - 1);
+            setMessage('Clipped the gate! Shield saved you!');
+            return gates.filter((g) => g.id !== hit.id);
+          }
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          setBestScores((b) => ({ ...b, skydive: Math.max(b.skydive, score) }));
+        }
+        return gates;
+      });
+
+      // Cloud turbulence hit
+      setSkyClouds((clouds) => {
+        const sx = skyXRef.current;
+        const hit = clouds.find((c) => {
+          const dx = sx - c.x;
+          const dy = 0.82 - c.y;
+          return Math.sqrt(dx * dx + dy * dy) < c.r;
+        });
+        if (hit) {
+          if (shields > 0) {
+            setShields((s) => s - 1);
+            setMessage('Turbulence! Shield absorbed!');
+            return clouds.filter((c) => c.id !== hit.id);
+          }
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          setBestScores((b) => ({ ...b, skydive: Math.max(b.skydive, score) }));
+        }
+        return clouds;
+      });
+    }, TICK_MS);
+
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, selectedMode, slowMotionSeconds, shields, score]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  BOX RACE GAME LOOP
+  // ══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!isPlaying || selectedMode !== 'boxrace') return;
+
+    const BOX_COLORS = ['#FF4444', '#FF9900', '#CC44FF', '#FF66AA', '#44DDAA'];
+
+    const interval = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      tickRef.current += 1;
+
+      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+        setSlowMotionSeconds((c) => Math.max(c - 1, 0));
+      }
+
+      // Increase racer speed over time
+      setRacerSpeed((s) => Math.min(s + 0.0004, 0.025));
+      const baseSpeed = slowMotionSeconds > 0 ? 0.01 : racerSpeed;
+
+      // Move rival boxes toward player and spawn new ones
+      setRaceBoxes((boxes) => {
+        const moved = boxes
+          .map((b) => ({ ...b, y: b.y + (baseSpeed + b.speed) }))
+          .filter((b) => b.y < 1.05);
+        if (tickRef.current % 35 === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            x: 0.1 + Math.random() * 0.7,
+            y: -0.08,
+            speed: 0.005 + Math.random() * 0.008,
+            color: BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)],
+          });
+        }
+        return moved;
+      });
+
+      // Move boost pads
+      setRaceBoosts((boosts) => {
+        const moved = boosts
+          .map((b) => ({ ...b, y: b.y + baseSpeed }))
+          .filter((b) => b.y < 1.05);
+        if (tickRef.current % 80 === 0) {
+          moved.push({
+            id: Date.now() + Math.random(),
+            x: 0.15 + Math.random() * 0.65,
+            y: -0.08,
+          });
+        }
+        return moved;
+      });
+
+      setScore((c) => c + 1);
+
+      // Collision with rival boxes
+      setRaceBoxes((boxes) => {
+        const rx = racerXRef.current;
+        const hit = boxes.find((b) => {
+          const dx = Math.abs(rx - b.x);
+          return dx < 0.1 && b.y > 0.8 && b.y < 0.96;
+        });
+        if (hit) {
+          if (shields > 0) {
+            setShields((s) => s - 1);
+            setMessage('Crash! Shield absorbed it!');
+            return boxes.filter((b) => b.id !== hit.id);
+          }
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          setBestScores((b) => ({ ...b, boxrace: Math.max(b.boxrace, score) }));
+        }
+        return boxes;
+      });
+
+      // Pick up boost pads
+      setRaceBoosts((boosts) => {
+        const rx = racerXRef.current;
+        const hit = boosts.find((b) => {
+          const dx = Math.abs(rx - b.x);
+          return dx < 0.1 && b.y > 0.8 && b.y < 0.96;
+        });
+        if (hit) {
+          setScore((c) => c + 30);
+          setMessage('⚡ Boost! +30');
+        }
+        return hit ? boosts.filter((b) => b.id !== hit.id) : boosts;
+      });
+    }, TICK_MS);
+
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, selectedMode, slowMotionSeconds, shields, score, racerSpeed]);
+
+  const resetGameState = useCallback((mode: GameModeKey) => {
+    tickRef.current = 0;
+    rewardedAtGameOverRef.current = false;
+    setScore(0);
+    setMessage('');
+    setSlowMotionSeconds(0);
+    // Surf
+    setSurferX(0.5);
+    surferXRef.current = 0.5;
+    setWaveZones([]);
+    setTrickAirborne(false);
+    setTubeMultiplier(1);
+    surfWavePhase.current = 0;
+    // Skate
+    setSkateAngle(0);
+    setSkateSpeed(0.04);
+    setSkateAirborne(false);
+    setSkateTrick(null);
+    setSkateRails([]);
+    skateAngleRef.current = 0;
+    skateSpeedRef.current = 0.04;
+    skateAirborneRef.current = false;
+    // Hackey
+    const firstTarget = Math.floor(Math.random() * 6);
+    setHackeyTarget(firstTarget);
+    setHackeyWindow(1);
+    setHackeyMisses(0);
+    setHackeyCombo(0);
+    hackeyTargetRef.current = firstTarget;
+    hackeyWindowRef.current = 1;
+    hackeyMissesRef.current = 0;
+    setHackeySackPos({ x: 0.5, y: 0.5 });
+    // Skydive
+    setSkyX(0.5);
+    skyXRef.current = 0.5;
+    setSkyGates([]);
+    setSkyClouds([]);
+    setSkyAltitude(10000);
+    setSkyGatesCleared(0);
+    // Box Race
+    setRacerX(0.5);
+    racerXRef.current = 0.5;
+    setRaceBoxes([]);
+    setRaceBoosts([]);
+    setRacerSpeed(0.008);
+  }, []);
+
+  const startGame = useCallback((mode: GameModeKey) => {
+    resetGameState(mode);
+    setSelectedMode(mode);
+    setShields(activeCharacter.shieldBonus);
+    setIsPlaying(true);
+    isPlayingRef.current = true;
+    setScreen('game');
+  }, [resetGameState, activeCharacter.shieldBonus]);
+
+  const restartGame = useCallback(() => {
+    resetGameState(selectedMode);
+    setShields(activeCharacter.shieldBonus);
+    setIsPlaying(true);
+    isPlayingRef.current = true;
+  }, [resetGameState, selectedMode, activeCharacter.shieldBonus]);
+
+  // ─── Surf: PanResponder ───────────────────────────────────────────────────
+  const surfPanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => selectedMode === 'surf' && isPlayingRef.current,
+    onMoveShouldSetPanResponder: () => selectedMode === 'surf' && isPlayingRef.current,
+    onPanResponderMove: (_, gs) => {
+      if (!isPlayingRef.current) return;
+      const newX = clamp(surferXRef.current + gs.dx / SCREEN_W, 0.05, 0.95);
+      surferXRef.current = newX;
+      setSurferX(newX);
+    },
+    onPanResponderRelease: (_, gs) => {
+      // Flick up = trick aerial
+      if (gs.vy < -0.8 && !trickAirborne) {
+        setTrickAirborne(true);
+        setMessage('Aerial trick! 🤙');
+        setScore((c) => c + 80);
+        setTimeout(() => {
+          setTrickAirborne(false);
+          setMessage('');
+        }, 1200);
+      }
+    },
+  }), [selectedMode, trickAirborne]);
+
+  // ─── Skate: PanResponder ──────────────────────────────────────────────────
+  const skatePanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => selectedMode === 'skate' && isPlayingRef.current,
+    onMoveShouldSetPanResponder: () => selectedMode === 'skate' && isPlayingRef.current,
+    onPanResponderRelease: (_, gs) => {
+      if (!isPlayingRef.current) return;
+      if (skateAirborneRef.current) {
+        // Trick tap while airborne
+        setScore((c) => c + 100);
+        setMessage('Trick landed! +100');
+        setSkateTrick(null);
+      } else {
+        // Pump: swipe left/right gives angular velocity
+        const push = -gs.dx / SCREEN_W * 0.3;
+        skateSpeedRef.current = clamp(skateSpeedRef.current + push, -0.15, 0.15);
+        setSkateSpeed(skateSpeedRef.current);
+      }
+    },
+  }), [selectedMode]);
+
+  // ─── Skydive: PanResponder ────────────────────────────────────────────────
+  const skydivePanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => selectedMode === 'skydive' && isPlayingRef.current,
+    onMoveShouldSetPanResponder: () => selectedMode === 'skydive' && isPlayingRef.current,
+    onPanResponderMove: (_, gs) => {
+      if (!isPlayingRef.current) return;
+      const newX = clamp(skyXRef.current + gs.dx / SCREEN_W * 0.05, 0.05, 0.95);
+      skyXRef.current = newX;
+      setSkyX(newX);
+    },
+  }), [selectedMode]);
+
+  // ─── Box Race: PanResponder ───────────────────────────────────────────────
+  const boxRacePanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => selectedMode === 'boxrace' && isPlayingRef.current,
+    onMoveShouldSetPanResponder: () => selectedMode === 'boxrace' && isPlayingRef.current,
+    onPanResponderMove: (_, gs) => {
+      if (!isPlayingRef.current) return;
+      const newX = clamp(racerXRef.current + gs.dx / SCREEN_W * 0.06, 0.08, 0.92);
+      racerXRef.current = newX;
+      setRacerX(newX);
+    },
+  }), [selectedMode]);
+
+  // ─── Hackey: tap a player ─────────────────────────────────────────────────
+  const hackeyTap = useCallback((playerId: number) => {
+    if (!isPlayingRef.current) return;
+    if (playerId === hackeyTargetRef.current) {
+      const bonus = Math.floor(hackeyWindowRef.current * 50) + hackeyCombo * 5;
+      setScore((c) => c + bonus);
+      setHackeyCombo((c) => c + 1);
+      setMessage(`Nice! +${bonus} (combo x${hackeyCombo + 1})`);
+      const nextTarget = Math.floor(Math.random() * 6);
+      hackeyTargetRef.current = nextTarget;
+      hackeyWindowRef.current = 1;
+      setHackeyTarget(nextTarget);
+      setHackeyWindow(1);
+    } else {
+      const newMisses = hackeyMissesRef.current + 1;
+      hackeyMissesRef.current = newMisses;
+      setHackeyMisses(newMisses);
+      setHackeyCombo(0);
+      setMessage(`Wrong player! ${3 - newMisses} left`);
+      if (newMisses >= 3) {
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        setBestScores((c) => ({ ...c, hackey: Math.max(c.hackey, score) }));
+      }
+    }
+  }, [hackeyCombo, score]);
+
+  // ─── Ad ───────────────────────────────────────────────────────────────────
+  const watchRewardAd = useCallback(() => {
     if (!rewardLoaded) {
       setMessage('Reward ad still loading. Try again shortly.');
       return;
@@ -330,35 +904,10 @@ export default function App() {
       void appendErrorLog(error, 'WatchRewardAd');
       setMessage('Unable to show rewarded ad.');
     }
-  };
+  }, [rewardLoaded, appendErrorLog]);
 
-  const startGame = (mode: GameModeKey) => {
-    tickRef.current = 0;
-    rewardedAtGameOverRef.current = false;
-    setSelectedMode(mode);
-    setPlayerLane(1);
-    setObstacles([]);
-    setScore(0);
-    setMessage('');
-    setSlowMotionSeconds(0);
-    setShields(activeCharacter.shieldBonus);
-    setIsPlaying(true);
-    setScreen('game');
-  };
-
-  const restartGame = () => {
-    tickRef.current = 0;
-    rewardedAtGameOverRef.current = false;
-    setPlayerLane(1);
-    setObstacles([]);
-    setScore(0);
-    setMessage('');
-    setSlowMotionSeconds(0);
-    setShields(activeCharacter.shieldBonus);
-    setIsPlaying(true);
-  };
-
-  const handleCharacterAction = (character: Character) => {
+  // ─── Character shop ───────────────────────────────────────────────────────
+  const handleCharacterAction = useCallback((character: Character) => {
     const isOwned = ownedCharacters.includes(character.id);
     if (isOwned) {
       setSelectedCharacterId(character.id);
@@ -373,8 +922,359 @@ export default function App() {
     setOwnedCharacters((c) => [...c, character.id]);
     setSelectedCharacterId(character.id);
     setMessage(`${character.name} unlocked and equipped!`);
+  }, [ownedCharacters, tokens]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  RENDER HELPERS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  const renderSurfGame = () => {
+    const waveY = 55 + Math.sin(surfWavePhase.current) * 4;
+    return (
+      <View style={styles.gameArea} {...surfPanResponder.panHandlers}>
+        {/* Ocean background gradient suggestion */}
+        <View style={[styles.surfOcean, { top: `${waveY}%` }]} />
+
+        {/* Wave crest line */}
+        <View style={[styles.waveCrease, { top: `${waveY - 2}%` }]} />
+
+        {/* Sweet zone indicator */}
+        <View style={styles.sweetZone}>
+          {tubeMultiplier > 1 && (
+            <View style={styles.sweetZoneGlow} />
+          )}
+        </View>
+
+        {/* Whitewater danger zones */}
+        {waveZones.map((z) => (
+          <View
+            key={z.id}
+            style={[
+              styles.whitewaterZone,
+              {
+                left: `${z.x * 100}%` as `${number}%`,
+                width: `${z.width * 100}%` as `${number}%`,
+                top: `${waveY - 8}%` as `${number}%`,
+              },
+            ]}
+          />
+        ))}
+
+        {/* Surfer */}
+        <View
+          style={[
+            styles.surfer,
+            {
+              left: `${surferX * 100 - 4}%` as `${number}%`,
+              top: `${waveY - 14}%` as `${number}%`,
+              backgroundColor: trickAirborne ? '#FFD700' : activeCharacter.color,
+              transform: trickAirborne ? [{ scale: 1.4 }, { rotate: '30deg' }] : [],
+            },
+          ]}
+        />
+
+        {/* HUD labels */}
+        <View style={styles.surfHudOverlay}>
+          {tubeMultiplier > 1 && (
+            <Text style={styles.tubeLabel}>🌊 TUBE x{tubeMultiplier}</Text>
+          )}
+          {trickAirborne && <Text style={styles.trickLabel}>✈️ AERIAL!</Text>}
+        </View>
+
+        {!isPlaying && renderGameOver()}
+      </View>
+    );
   };
 
+  const renderSkateGame = () => {
+    // Map angle to position on a half-pipe visual
+    const PIPE_CENTER_X = 50; // %
+    const PIPE_CENTER_Y = 75; // % (bottom of pipe)
+    const PIPE_RADIUS_PX_X = 38; // % width of arc
+    const PIPE_RADIUS_PX_Y = 55; // % height of arc
+
+    const skaterX = PIPE_CENTER_X + Math.sin(skateAngle) * PIPE_RADIUS_PX_X;
+    const skaterY = PIPE_CENTER_Y - Math.abs(Math.cos(skateAngle)) * PIPE_RADIUS_PX_Y;
+    const airY = skateAirborne ? skaterY - 15 : skaterY;
+
+    return (
+      <View style={styles.gameArea} {...skatePanResponder.panHandlers}>
+        {/* Pipe walls */}
+        <View style={styles.pipeLeft} />
+        <View style={styles.pipeRight} />
+        <View style={styles.pipeBottom} />
+
+        {/* Coping dots */}
+        <View style={[styles.coping, { left: '8%' }]} />
+        <View style={[styles.coping, { right: '8%' }]} />
+
+        {/* Rails */}
+        {skateRails.map((rail) => (
+          <View
+            key={rail.id}
+            style={[
+              styles.skateRail,
+              rail.side === 'left' ? { left: '10%' } : { right: '10%' },
+              { opacity: rail.active ? 1 : 0.3 },
+            ]}
+          />
+        ))}
+
+        {/* Skater */}
+        <View
+          style={[
+            styles.skater,
+            {
+              left: `${skaterX - 3}%` as `${number}%`,
+              top: `${airY - 4}%` as `${number}%`,
+              backgroundColor: activeCharacter.color,
+              transform: [{ rotate: `${skateAngle * 45}deg` }],
+            },
+          ]}
+        />
+
+        {/* Trick indicator */}
+        {skateTrick && (
+          <View style={styles.trickBubble}>
+            <Text style={styles.trickBubbleText}>🛹 {skateTrick}</Text>
+            <Text style={styles.trickBubbleSub}>Tap to land!</Text>
+          </View>
+        )}
+
+        {/* Hint */}
+        <Text style={styles.skateHint}>Swipe ← → to pump</Text>
+
+        {!isPlaying && renderGameOver()}
+      </View>
+    );
+  };
+
+  const renderHackeyGame = () => {
+    const CIRCLE_R = 38; // % of game area
+    const CENTER = 50;
+
+    return (
+      <View style={styles.gameArea}>
+        {/* Background circle track */}
+        <View style={styles.hackeyTrack} />
+
+        {/* Sack */}
+        <View
+          style={[
+            styles.hackeySack,
+            {
+              left: `${hackeySackPos.x * 100 - 3}%` as `${number}%`,
+              top: `${hackeySackPos.y * 100 - 3}%` as `${number}%`,
+            },
+          ]}
+        />
+
+        {/* Players */}
+        {HACKEY_PLAYERS.map((p) => {
+          const px = CENTER + Math.cos(p.angle) * CIRCLE_R;
+          const py = CENTER + Math.sin(p.angle) * CIRCLE_R;
+          const isTarget = p.id === hackeyTarget;
+          return (
+            <Pressable
+              key={p.id}
+              onPress={() => hackeyTap(p.id)}
+              style={[
+                styles.hackeyPlayer,
+                {
+                  left: `${px - 6}%` as `${number}%`,
+                  top: `${py - 6}%` as `${number}%`,
+                  backgroundColor: isTarget ? activeCharacter.color : '#2A3A50',
+                  borderColor: isTarget ? activeMode.accentColor : '#1E3550',
+                  transform: [{ scale: isTarget ? 1.3 : 1 }],
+                },
+              ]}
+            >
+              <Text style={styles.hackeyPlayerEmoji}>{isTarget ? '🤸' : '🧍'}</Text>
+            </Pressable>
+          );
+        })}
+
+        {/* Window bar — shrinking timer */}
+        <View style={styles.hackeyWindowBar}>
+          <View
+            style={[
+              styles.hackeyWindowFill,
+              {
+                width: `${hackeyWindow * 100}%` as `${number}%`,
+                backgroundColor:
+                  hackeyWindow > 0.5
+                    ? '#7ED8A0'
+                    : hackeyWindow > 0.25
+                    ? '#FFD700'
+                    : '#FF4444',
+              },
+            ]}
+          />
+        </View>
+
+        {/* Combo / Misses display */}
+        <View style={styles.hackeyStats}>
+          <Text style={styles.hackeyStatText}>Combo: {hackeyCombo}</Text>
+          <Text style={[styles.hackeyStatText, { color: '#FF6B6B' }]}>
+            {'⚡'.repeat(3 - hackeyMisses)}{'💀'.repeat(hackeyMisses)}
+          </Text>
+        </View>
+
+        {!isPlaying && renderGameOver()}
+      </View>
+    );
+  };
+
+  const renderSkydiveGame = () => (
+    <View style={styles.gameArea} {...skydivePanResponder.panHandlers}>
+      {/* Sky background */}
+      <View style={styles.skyBg} />
+
+      {/* Cloud turbulence pockets */}
+      {skyClouds.map((c) => (
+        <View
+          key={c.id}
+          style={[
+            styles.skyCloud,
+            {
+              left: `${(c.x - c.r) * 100}%` as `${number}%`,
+              top: `${c.y * 100}%` as `${number}%`,
+              width: `${c.r * 2 * 100}%` as `${number}%`,
+              height: `${c.r * 2 * 100}%` as `${number}%`,
+              borderRadius: 999,
+            },
+          ]}
+        />
+      ))}
+
+      {/* Ring gates */}
+      {skyGates.map((g) => {
+        const gapLeftPct = (g.gapX - 0.14) * 100;
+        const gapRightPct = (1 - g.gapX - 0.14) * 100;
+        return (
+          <View
+            key={g.id}
+            style={[styles.gateRow, { top: `${g.y * 100}%` as `${number}%` }]}
+          >
+            {/* Left wall */}
+            <View style={[styles.gateWall, { width: `${gapLeftPct}%` as `${number}%` }]} />
+            {/* Gap */}
+            <View style={styles.gateGap} />
+            {/* Right wall */}
+            <View style={[styles.gateWall, { width: `${gapRightPct}%` as `${number}%` }]} />
+          </View>
+        );
+      })}
+
+      {/* Skydiver */}
+      <View
+        style={[
+          styles.skydiver,
+          {
+            left: `${skyX * 100 - 4}%` as `${number}%`,
+            backgroundColor: activeCharacter.color,
+          },
+        ]}
+      />
+
+      {/* HUD overlay */}
+      <View style={styles.skyHud}>
+        <Text style={styles.skyHudText}>🪂 {skyAltitude.toLocaleString()} ft</Text>
+        <Text style={styles.skyHudText}>Gates: {skyGatesCleared}</Text>
+      </View>
+
+      <Text style={styles.skyHint}>Drag to steer</Text>
+
+      {!isPlaying && renderGameOver()}
+    </View>
+  );
+
+  const renderBoxRaceGame = () => (
+    <View style={styles.gameArea} {...boxRacePanResponder.panHandlers}>
+      {/* Track */}
+      <View style={styles.raceTrack} />
+      <View style={[styles.raceEdge, { left: '8%' }]} />
+      <View style={[styles.raceEdge, { right: '8%' }]} />
+
+      {/* Boost pads */}
+      {raceBoosts.map((b) => (
+        <View
+          key={b.id}
+          style={[
+            styles.boostPad,
+            {
+              left: `${b.x * 100 - 4}%` as `${number}%`,
+              top: `${b.y * 100}%` as `${number}%`,
+            },
+          ]}
+        >
+          <Text style={styles.boostEmoji}>⚡</Text>
+        </View>
+      ))}
+
+      {/* Rival boxes */}
+      {raceBoxes.map((b) => (
+        <View
+          key={b.id}
+          style={[
+            styles.rivalBox,
+            {
+              left: `${b.x * 100 - 5}%` as `${number}%`,
+              top: `${b.y * 100}%` as `${number}%`,
+              backgroundColor: b.color,
+            },
+          ]}
+        >
+          <Text style={styles.rivalBoxEmoji}>📦</Text>
+        </View>
+      ))}
+
+      {/* Player box */}
+      <View
+        style={[
+          styles.playerBox,
+          {
+            left: `${racerX * 100 - 5}%` as `${number}%`,
+            backgroundColor: activeCharacter.color,
+          },
+        ]}
+      >
+        <Text style={styles.playerBoxEmoji}>🏎</Text>
+      </View>
+
+      <Text style={styles.raceHint}>Drag to steer</Text>
+
+      {!isPlaying && renderGameOver()}
+    </View>
+  );
+
+  const renderGameOver = () => (
+    <View style={styles.gameOverOverlay}>
+      <Text style={styles.gameOverTitle}>Run Over</Text>
+      <Text style={styles.gameOverScore}>{score}</Text>
+      <Text style={styles.gameOverLabel}>score</Text>
+      <Text style={styles.gameOverBest}>Best: {bestScores[selectedMode]}</Text>
+      {message ? <Text style={styles.gameOverMsg}>{message}</Text> : null}
+      <Pressable
+        onPress={restartGame}
+        style={[styles.gameOverBtn, { backgroundColor: activeMode.accentColor }]}
+      >
+        <Text style={styles.gameOverBtnText}>Play Again</Text>
+      </Pressable>
+      <Pressable onPress={() => setScreen('select')} style={styles.gameOverSecondary}>
+        <Text style={styles.gameOverSecondaryText}>Change Sport</Text>
+      </Pressable>
+      {rewardLoaded && (
+        <Pressable onPress={watchRewardAd} style={styles.gameOverAdBtn}>
+          <Text style={styles.gameOverAdText}>🎬 Watch Ad for Bonus</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  MAIN RENDER
+  // ══════════════════════════════════════════════════════════════════════════
   return (
     <>
       {/* ── Character Modal ─────────────────────────────────────────────── */}
@@ -453,18 +1353,16 @@ export default function App() {
             contentContainerStyle={styles.scrollContent}
             showsVerticalScrollIndicator={false}
           >
-            {/* Hero */}
             <View style={styles.heroSection}>
               <Text style={styles.heroEmoji}>🤙</Text>
               <Text style={styles.heroTitle}>Retro Rush</Text>
               <Text style={styles.heroTagline}>Pick your sport. Earn your run.</Text>
               <Text style={styles.heroDesc}>
-                Three extreme sport arcade games — surf, skate, and hackey flow — with
-                characters, tokens, and high scores to chase.
+                Three extreme sport arcade games — surf the wave face, pump the half pipe, and
+                keep the hacky sack alive — with characters, tokens, and high scores to chase.
               </Text>
             </View>
 
-            {/* Stats bar */}
             <View style={styles.statsBar}>
               <View style={styles.statItem}>
                 <Text style={styles.statValue}>{tokens}</Text>
@@ -482,7 +1380,6 @@ export default function App() {
               </View>
             </View>
 
-            {/* Primary CTA */}
             <Pressable
               onPress={() => setScreen('select')}
               style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
@@ -490,7 +1387,6 @@ export default function App() {
               <Text style={styles.primaryBtnText}>Select Game →</Text>
             </Pressable>
 
-            {/* Characters button */}
             <Pressable
               onPress={() => setShowCharacters(true)}
               style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
@@ -498,7 +1394,6 @@ export default function App() {
               <Text style={styles.secondaryBtnText}>🎽  Characters & Unlocks</Text>
             </Pressable>
 
-            {/* Reward ad */}
             <Pressable
               onPress={watchRewardAd}
               style={({ pressed }) => [
@@ -514,7 +1409,6 @@ export default function App() {
               </Text>
             </Pressable>
 
-            {/* Best scores */}
             <Text style={styles.sectionHeader}>Personal Bests</Text>
             <View style={styles.bestsRow}>
               {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => (
@@ -584,8 +1478,7 @@ export default function App() {
                   <View style={styles.modeCardBottom}>
                     <Text style={styles.modeCardRule}>{mode.shortRules}</Text>
                     <Text style={styles.modeCardBest}>
-                      Best:{' '}
-                      <Text style={{ color: mode.accentColor }}>{bestScores[key]}</Text>
+                      Best: <Text style={{ color: mode.accentColor }}>{bestScores[key]}</Text>
                     </Text>
                   </View>
                   <View style={[styles.startPill, { backgroundColor: mode.accentColor }]}>
@@ -623,98 +1516,25 @@ export default function App() {
             <View style={styles.hudRight}>
               <Text style={styles.hudStat}>Score {score}</Text>
               <Text style={styles.hudStat}>🛡 {shields}</Text>
-              {slowMotionSeconds > 0 ? (
+              {slowMotionSeconds > 0 && (
                 <Text style={[styles.hudStat, { color: '#FFD700' }]}>⏱ {slowMotionSeconds}s</Text>
-              ) : null}
+              )}
             </View>
           </View>
 
-          {/* Game area */}
-          <View style={styles.gameArea}>
-            <View style={styles.laneDivider} />
-            <View style={[styles.laneDivider, styles.secondDivider]} />
-
-            {obstacles.map((o) => (
-              <View
-                key={o.id}
-                style={[
-                  styles.obstacle,
-                  {
-                    backgroundColor: activeMode.obstacleColor,
-                    left: `${o.lane * (100 / LANE_COUNT) + 7}%` as `${number}%`,
-                    top: `${o.y}%` as `${number}%`,
-                  },
-                ]}
-              />
-            ))}
-
-            <View
-              style={[
-                styles.player,
-                {
-                  backgroundColor: activeCharacter.color,
-                  left: `${playerLane * (100 / LANE_COUNT) + 7}%` as `${number}%`,
-                },
-              ]}
-            />
-
-            {/* Game Over overlay */}
-            {!isPlaying ? (
-              <View style={styles.gameOverOverlay}>
-                <Text style={styles.gameOverTitle}>Run Over</Text>
-                <Text style={styles.gameOverScore}>{score}</Text>
-                <Text style={styles.gameOverLabel}>score</Text>
-                <Text style={styles.gameOverBest}>Best: {bestScores[selectedMode]}</Text>
-                {message ? (
-                  <Text style={styles.gameOverMsg}>{message}</Text>
-                ) : null}
-                <Pressable
-                  onPress={restartGame}
-                  style={[styles.gameOverBtn, { backgroundColor: activeMode.accentColor }]}
-                >
-                  <Text style={styles.gameOverBtnText}>Play Again</Text>
-                </Pressable>
-                <Pressable onPress={() => setScreen('select')} style={styles.gameOverSecondary}>
-                  <Text style={styles.gameOverSecondaryText}>Change Sport</Text>
-                </Pressable>
-                {rewardLoaded ? (
-                  <Pressable onPress={watchRewardAd} style={styles.gameOverAdBtn}>
-                    <Text style={styles.gameOverAdText}>🎬 Watch Ad for Bonus</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            ) : null}
-          </View>
+          {/* Game content */}
+          {selectedMode === 'surf' && renderSurfGame()}
+          {selectedMode === 'skate' && renderSkateGame()}
+          {selectedMode === 'hackey' && renderHackeyGame()}
+          {selectedMode === 'skydive' && renderSkydiveGame()}
+          {selectedMode === 'boxrace' && renderBoxRaceGame()}
 
           {/* In-game message strip */}
           {isPlaying && message ? (
-            <View
-              style={[
-                styles.inGameMsg,
-                { backgroundColor: activeMode.accentColor + '33' },
-              ]}
-            >
+            <View style={[styles.inGameMsg, { backgroundColor: activeMode.accentColor + '33' }]}>
               <Text style={[styles.inGameMsgText, { color: activeMode.accentColor }]}>
                 {message}
               </Text>
-            </View>
-          ) : null}
-
-          {/* Controls — large tap zones */}
-          {isPlaying ? (
-            <View style={styles.controlsArea}>
-              <Pressable
-                onPress={moveLeft}
-                style={({ pressed }) => [styles.tapZone, pressed && styles.tapZonePressed]}
-              >
-                <Text style={styles.tapZoneText}>◀ LEFT</Text>
-              </Pressable>
-              <Pressable
-                onPress={moveRight}
-                style={({ pressed }) => [styles.tapZone, pressed && styles.tapZonePressed]}
-              >
-                <Text style={styles.tapZoneText}>RIGHT ▶</Text>
-              </Pressable>
             </View>
           ) : null}
         </SafeAreaView>
@@ -723,6 +1543,7 @@ export default function App() {
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
@@ -733,540 +1554,353 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 32,
   },
-  pressed: {
-    opacity: 0.75,
-  },
+  pressed: { opacity: 0.75 },
 
   // ── Landing ──────────────────────────────────────────────────────────────
-  heroSection: {
-    alignItems: 'center',
-    paddingVertical: 28,
-  },
-  heroEmoji: {
-    fontSize: 52,
-    marginBottom: 8,
-  },
-  heroTitle: {
-    color: '#E6F7FF',
-    fontSize: 40,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-  heroTagline: {
-    color: '#56B0FF',
-    fontSize: 16,
-    fontWeight: '600',
-    marginTop: 6,
-    marginBottom: 12,
-  },
-  heroDesc: {
-    color: '#7FA8C7',
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
-    paddingHorizontal: 8,
-  },
+  heroSection: { alignItems: 'center', paddingVertical: 28 },
+  heroEmoji: { fontSize: 52, marginBottom: 8 },
+  heroTitle: { color: '#E6F7FF', fontSize: 40, fontWeight: '800', letterSpacing: 1 },
+  heroTagline: { color: '#56B0FF', fontSize: 16, fontWeight: '600', marginTop: 6, marginBottom: 12 },
+  heroDesc: { color: '#7FA8C7', fontSize: 14, textAlign: 'center', lineHeight: 20, paddingHorizontal: 8 },
   statsBar: {
-    flexDirection: 'row',
-    backgroundColor: '#0E1E30',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#1E3550',
-    paddingVertical: 14,
-    marginBottom: 18,
-    alignItems: 'center',
-    justifyContent: 'space-around',
+    flexDirection: 'row', backgroundColor: '#0E1E30', borderRadius: 14,
+    borderWidth: 1, borderColor: '#1E3550', paddingVertical: 14,
+    marginBottom: 18, alignItems: 'center', justifyContent: 'space-around',
   },
-  statItem: {
-    alignItems: 'center',
-    gap: 4,
-  },
-  statValue: {
-    color: '#E6F4FF',
-    fontWeight: '700',
-    fontSize: 18,
-  },
-  statLabel: {
-    color: '#6E97BB',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  statDivider: {
-    width: 1,
-    height: 32,
-    backgroundColor: '#1E3550',
-  },
-  charDot: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-  },
-  primaryBtn: {
-    backgroundColor: '#56B0FF',
-    borderRadius: 14,
-    paddingVertical: 18,
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  primaryBtnText: {
-    color: '#06111E',
-    fontWeight: '800',
-    fontSize: 18,
-    letterSpacing: 0.5,
-  },
+  statItem: { alignItems: 'center', gap: 4 },
+  statValue: { color: '#E6F4FF', fontWeight: '700', fontSize: 18 },
+  statLabel: { color: '#6E97BB', fontSize: 11, fontWeight: '600' },
+  statDivider: { width: 1, height: 32, backgroundColor: '#1E3550' },
+  charDot: { width: 18, height: 18, borderRadius: 9 },
+  primaryBtn: { backgroundColor: '#56B0FF', borderRadius: 14, paddingVertical: 18, alignItems: 'center', marginBottom: 12 },
+  primaryBtnText: { color: '#06111E', fontWeight: '800', fontSize: 18, letterSpacing: 0.5 },
   secondaryBtn: {
-    backgroundColor: '#0E1E30',
-    borderWidth: 1,
-    borderColor: '#1E3550',
-    borderRadius: 14,
-    paddingVertical: 15,
-    alignItems: 'center',
-    marginBottom: 12,
+    backgroundColor: '#0E1E30', borderWidth: 1, borderColor: '#1E3550',
+    borderRadius: 14, paddingVertical: 15, alignItems: 'center', marginBottom: 12,
   },
-  secondaryBtnText: {
-    color: '#CFE8FF',
-    fontWeight: '700',
-    fontSize: 15,
-  },
+  secondaryBtnText: { color: '#CFE8FF', fontWeight: '700', fontSize: 15 },
   adBtn: {
-    backgroundColor: '#1A3D25',
-    borderWidth: 1,
-    borderColor: '#2E7048',
-    borderRadius: 14,
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginBottom: 20,
+    backgroundColor: '#1A3D25', borderWidth: 1, borderColor: '#2E7048',
+    borderRadius: 14, paddingVertical: 14, alignItems: 'center', marginBottom: 20,
   },
-  adBtnDisabled: {
-    opacity: 0.5,
-  },
-  adBtnText: {
-    color: '#7ED8A0',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  sectionHeader: {
-    color: '#94B8D4',
-    fontSize: 13,
-    fontWeight: '700',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginBottom: 10,
-  },
-  bestsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 16,
-  },
-  bestCard: {
-    flex: 1,
-    backgroundColor: '#0E1E30',
-    borderRadius: 12,
-    borderWidth: 1,
-    alignItems: 'center',
-    paddingVertical: 14,
-    gap: 4,
-  },
-  bestEmoji: {
-    fontSize: 22,
-  },
-  bestScore: {
-    fontSize: 22,
-    fontWeight: '800',
-  },
-  bestLabel: {
-    color: '#5E84A2',
-    fontSize: 10,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
+  adBtnDisabled: { opacity: 0.5 },
+  adBtnText: { color: '#7ED8A0', fontWeight: '700', fontSize: 14 },
+  sectionHeader: { color: '#94B8D4', fontSize: 13, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
+  bestsRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
+  bestCard: { flex: 1, backgroundColor: '#0E1E30', borderRadius: 12, borderWidth: 1, alignItems: 'center', paddingVertical: 14, gap: 4 },
+  bestEmoji: { fontSize: 22 },
+  bestScore: { fontSize: 22, fontWeight: '800' },
+  bestLabel: { color: '#5E84A2', fontSize: 10, fontWeight: '600', textAlign: 'center' },
 
-  // ── Select Screen ─────────────────────────────────────────────────────────
-  navRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-    justifyContent: 'space-between',
-  },
-  backBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 4,
-    width: 64,
-  },
-  backBtnText: {
-    color: '#7FB4D8',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  navTitle: {
-    color: '#E6F7FF',
-    fontWeight: '800',
-    fontSize: 18,
-  },
-  modeCard: {
-    borderWidth: 1.5,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    gap: 10,
-  },
-  modeCardTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  modeEmoji: {
-    fontSize: 36,
-  },
-  modeCardInfo: {
-    flex: 1,
-    gap: 3,
-  },
-  modeCardName: {
-    fontWeight: '800',
-    fontSize: 20,
-  },
-  modeCardDesc: {
-    color: '#8AAEC8',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  multiplierBadge: {
-    borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    alignSelf: 'flex-start',
-  },
-  multiplierText: {
-    color: '#06111E',
-    fontWeight: '800',
-    fontSize: 13,
-  },
-  modeCardBottom: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  modeCardRule: {
-    color: '#6E97BB',
-    fontSize: 13,
-    flex: 1,
-  },
-  modeCardBest: {
-    color: '#6E97BB',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  startPill: {
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  startPillText: {
-    color: '#06111E',
-    fontWeight: '800',
-    fontSize: 13,
-    letterSpacing: 1,
-  },
+  // ── Select ────────────────────────────────────────────────────────────────
+  navRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 20, justifyContent: 'space-between' },
+  backBtn: { paddingVertical: 8, paddingHorizontal: 4, width: 64 },
+  backBtnText: { color: '#7FB4D8', fontWeight: '700', fontSize: 15 },
+  navTitle: { color: '#E6F7FF', fontWeight: '800', fontSize: 18 },
+  modeCard: { borderWidth: 1.5, borderRadius: 16, padding: 16, marginBottom: 16, gap: 10 },
+  modeCardTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  modeEmoji: { fontSize: 36 },
+  modeCardInfo: { flex: 1, gap: 3 },
+  modeCardName: { fontWeight: '800', fontSize: 20 },
+  modeCardDesc: { color: '#8AAEC8', fontSize: 13, lineHeight: 18 },
+  multiplierBadge: { borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start' },
+  multiplierText: { color: '#06111E', fontWeight: '800', fontSize: 13 },
+  modeCardBottom: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  modeCardRule: { color: '#6E97BB', fontSize: 13, flex: 1 },
+  modeCardBest: { color: '#6E97BB', fontSize: 13, fontWeight: '600' },
+  startPill: { borderRadius: 8, paddingVertical: 10, alignItems: 'center' },
+  startPillText: { color: '#06111E', fontWeight: '800', fontSize: 13, letterSpacing: 1 },
 
-  // ── Game Screen ──────────────────────────────────────────────────────────
+  // ── HUD ───────────────────────────────────────────────────────────────────
   gameHud: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    backgroundColor: '#08101E',
-    gap: 8,
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12,
+    paddingVertical: 10, borderBottomWidth: 1, backgroundColor: '#08101E', gap: 8,
   },
-  hudBack: {
-    width: 36,
-    height: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
+  hudBack: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  hudBackText: { color: '#7FB4D8', fontSize: 22, fontWeight: '700' },
+  hudBackDisabled: { opacity: 0.25 },
+  hudCenter: { flex: 1, alignItems: 'center' },
+  hudMode: { fontWeight: '800', fontSize: 15 },
+  hudRight: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  hudStat: { color: '#CFE8FF', fontWeight: '700', fontSize: 13 },
+
+  // ── Game area ─────────────────────────────────────────────────────────────
+  gameArea: { flex: 1, position: 'relative', overflow: 'hidden', backgroundColor: '#111D30' },
+
+  // ── Surf ──────────────────────────────────────────────────────────────────
+  surfOcean: {
+    position: 'absolute', left: 0, right: 0, bottom: 0,
+    backgroundColor: '#0A3A6A', opacity: 0.85,
   },
-  hudBackText: {
-    color: '#7FB4D8',
-    fontSize: 22,
-    fontWeight: '700',
+  waveCrease: {
+    position: 'absolute', left: 0, right: 0, height: 5,
+    backgroundColor: '#4DD0FF', opacity: 0.7, borderRadius: 3,
   },
-  hudBackDisabled: {
-    opacity: 0.25,
+  sweetZone: {
+    position: 'absolute', left: '35%', right: '35%', top: 0, bottom: 0,
+    borderLeftWidth: 1, borderRightWidth: 1, borderColor: '#56B0FF22',
   },
-  hudCenter: {
-    flex: 1,
-    alignItems: 'center',
+  sweetZoneGlow: {
+    ...StyleSheet.absoluteFill, backgroundColor: '#56B0FF18', borderRadius: 4,
   },
-  hudMode: {
-    fontWeight: '800',
-    fontSize: 15,
+  whitewaterZone: {
+    position: 'absolute', height: 36, backgroundColor: '#FFFFFFCC',
+    borderRadius: 8, opacity: 0.85,
   },
-  hudRight: {
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center',
+  surfer: {
+    position: 'absolute', width: 32, height: 32, borderRadius: 16,
+    borderWidth: 3, borderColor: '#FFFFFF55',
   },
-  hudStat: {
-    color: '#CFE8FF',
-    fontWeight: '700',
-    fontSize: 13,
+  surfHudOverlay: {
+    position: 'absolute', top: 12, left: 0, right: 0, alignItems: 'center', gap: 4,
   },
-  gameArea: {
-    flex: 1,
-    position: 'relative',
-    overflow: 'hidden',
-    backgroundColor: '#111D30',
+  tubeLabel: { color: '#56B0FF', fontWeight: '800', fontSize: 16, letterSpacing: 1 },
+  trickLabel: { color: '#FFD700', fontWeight: '800', fontSize: 18 },
+
+  // ── Skate ─────────────────────────────────────────────────────────────────
+  pipeLeft: {
+    position: 'absolute', left: 0, top: '20%', bottom: 0, width: '12%',
+    backgroundColor: '#2A1A0A', borderTopRightRadius: 120, borderRightWidth: 3, borderColor: '#8B5C2A',
   },
-  laneDivider: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 1,
-    left: '33.33%',
-    backgroundColor: '#1E3550',
+  pipeRight: {
+    position: 'absolute', right: 0, top: '20%', bottom: 0, width: '12%',
+    backgroundColor: '#2A1A0A', borderTopLeftRadius: 120, borderLeftWidth: 3, borderColor: '#8B5C2A',
   },
-  secondDivider: {
-    left: '66.66%',
+  pipeBottom: {
+    position: 'absolute', left: '12%', right: '12%', bottom: 0, height: '25%',
+    backgroundColor: '#1A0F07', borderTopWidth: 3, borderColor: '#6B4520',
   },
-  obstacle: {
-    position: 'absolute',
-    width: '19%',
-    height: 24,
-    borderRadius: 6,
+  coping: {
+    position: 'absolute', top: '20%', width: 14, height: 14,
+    borderRadius: 7, backgroundColor: '#CCA060',
   },
-  player: {
-    position: 'absolute',
-    width: '19%',
-    height: 28,
-    borderRadius: 8,
-    bottom: '8%',
+  skateRail: {
+    position: 'absolute', top: '20%', width: 6, height: 60,
+    backgroundColor: '#AAAAAA', borderRadius: 3,
   },
+  skater: {
+    position: 'absolute', width: 28, height: 28, borderRadius: 6,
+    borderWidth: 2, borderColor: '#FFFFFF55',
+  },
+  trickBubble: {
+    position: 'absolute', top: '10%', left: '20%', right: '20%',
+    backgroundColor: '#1A0F07EE', borderRadius: 14, padding: 12, alignItems: 'center',
+    borderWidth: 1, borderColor: '#FF6B6B',
+  },
+  trickBubbleText: { color: '#FF6B6B', fontWeight: '800', fontSize: 18 },
+  trickBubbleSub: { color: '#CC8866', fontSize: 12, marginTop: 2 },
+  skateHint: {
+    position: 'absolute', bottom: 14, left: 0, right: 0,
+    textAlign: 'center', color: '#5E3A1A', fontWeight: '700', fontSize: 12,
+  },
+
+  // ── Hackey ────────────────────────────────────────────────────────────────
+  hackeyTrack: {
+    position: 'absolute', top: '10%', left: '8%', right: '8%', bottom: '18%',
+    borderRadius: 500, borderWidth: 1, borderColor: '#3A2A60', backgroundColor: '#140D2A',
+  },
+  hackeySack: {
+    position: 'absolute', width: 22, height: 22, borderRadius: 11,
+    backgroundColor: '#E8C850', borderWidth: 2, borderColor: '#FFD700',
+    zIndex: 10,
+  },
+  hackeyPlayer: {
+    position: 'absolute', width: 48, height: 48, borderRadius: 24,
+    borderWidth: 2, alignItems: 'center', justifyContent: 'center',
+  },
+  hackeyPlayerEmoji: { fontSize: 22 },
+  hackeyWindowBar: {
+    position: 'absolute', bottom: 0, left: 0, right: 0, height: 8,
+    backgroundColor: '#1A0D33',
+  },
+  hackeyWindowFill: { height: 8, borderRadius: 4 },
+  hackeyStats: {
+    position: 'absolute', bottom: 16, left: 0, right: 0,
+    flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center',
+  },
+  hackeyStatText: { color: '#CFE8FF', fontWeight: '700', fontSize: 14 },
+
+  // ── Game Over ─────────────────────────────────────────────────────────────
   gameOverOverlay: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(6,10,18,0.92)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingHorizontal: 32,
+    backgroundColor: 'rgba(6,10,18,0.92)', alignItems: 'center', justifyContent: 'center',
+    gap: 6, paddingHorizontal: 32,
   },
-  gameOverTitle: {
-    color: '#94B8D4',
-    fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-  gameOverScore: {
-    color: '#E6F7FF',
-    fontSize: 64,
-    fontWeight: '800',
-    lineHeight: 72,
-  },
-  gameOverLabel: {
-    color: '#5E84A2',
-    fontSize: 13,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: 4,
-  },
-  gameOverBest: {
-    color: '#7FA8C7',
-    fontSize: 14,
-    marginBottom: 16,
-  },
-  gameOverMsg: {
-    color: '#7ED8A0',
-    fontSize: 13,
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  gameOverBtn: {
-    width: '100%',
-    paddingVertical: 16,
-    borderRadius: 14,
-    alignItems: 'center',
-    marginTop: 4,
-  },
-  gameOverBtnText: {
-    color: '#06111E',
-    fontWeight: '800',
-    fontSize: 17,
-  },
-  gameOverSecondary: {
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  gameOverSecondaryText: {
-    color: '#7FB4D8',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  gameOverAdBtn: {
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  gameOverAdText: {
-    color: '#7ED8A0',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  inGameMsg: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    alignItems: 'center',
-  },
-  inGameMsgText: {
-    fontWeight: '700',
-    fontSize: 13,
-  },
-  controlsArea: {
-    flexDirection: 'row',
-    height: 110,
-  },
-  tapZone: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#0C1A2A',
-    borderTopWidth: 1,
-    borderColor: '#1E3550',
-  },
-  tapZonePressed: {
-    backgroundColor: '#1A3050',
-  },
-  tapZoneText: {
-    color: '#4A7FA0',
-    fontWeight: '800',
-    fontSize: 20,
-    letterSpacing: 1,
-  },
+  gameOverTitle: { color: '#94B8D4', fontSize: 16, fontWeight: '700', letterSpacing: 2, textTransform: 'uppercase' },
+  gameOverScore: { color: '#E6F7FF', fontSize: 64, fontWeight: '800', lineHeight: 72 },
+  gameOverLabel: { color: '#5E84A2', fontSize: 13, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 },
+  gameOverBest: { color: '#7FA8C7', fontSize: 14, marginBottom: 16 },
+  gameOverMsg: { color: '#7ED8A0', fontSize: 13, textAlign: 'center', marginBottom: 8 },
+  gameOverBtn: { width: '100%', paddingVertical: 16, borderRadius: 14, alignItems: 'center', marginTop: 4 },
+  gameOverBtnText: { color: '#06111E', fontWeight: '800', fontSize: 17 },
+  gameOverSecondary: { paddingVertical: 12, alignItems: 'center' },
+  gameOverSecondaryText: { color: '#7FB4D8', fontWeight: '700', fontSize: 15 },
+  gameOverAdBtn: { paddingVertical: 10, alignItems: 'center' },
+  gameOverAdText: { color: '#7ED8A0', fontWeight: '700', fontSize: 14 },
+
+  // ── In-game message ────────────────────────────────────────────────────────
+  inGameMsg: { paddingVertical: 8, paddingHorizontal: 16, alignItems: 'center' },
+  inGameMsgText: { fontWeight: '700', fontSize: 13 },
 
   // ── Character Modal ───────────────────────────────────────────────────────
-  modalBackdrop: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-  },
+  modalBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.6)' },
   modalSheet: {
-    backgroundColor: '#0C1B2C',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingHorizontal: 18,
-    paddingBottom: 32,
-    maxHeight: '85%',
+    backgroundColor: '#0C1B2C', borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    paddingHorizontal: 18, paddingBottom: 32, maxHeight: '85%',
   },
   modalHandle: {
-    width: 40,
-    height: 4,
-    backgroundColor: '#2A4560',
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginTop: 10,
-    marginBottom: 14,
+    width: 40, height: 4, backgroundColor: '#2A4560', borderRadius: 2,
+    alignSelf: 'center', marginTop: 10, marginBottom: 14,
   },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  modalTitle: {
-    color: '#E6F7FF',
-    fontWeight: '800',
-    fontSize: 20,
-  },
-  modalClose: {
-    width: 36,
-    height: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modalCloseText: {
-    color: '#5E84A2',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  modalTokens: {
-    color: '#56B0FF',
-    fontWeight: '700',
-    fontSize: 14,
-    marginBottom: 12,
-  },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  modalTitle: { color: '#E6F7FF', fontWeight: '800', fontSize: 20 },
+  modalClose: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  modalCloseText: { color: '#5E84A2', fontSize: 18, fontWeight: '700' },
+  modalTokens: { color: '#56B0FF', fontWeight: '700', fontSize: 14, marginBottom: 12 },
   charCard: {
-    flexDirection: 'row',
-    backgroundColor: '#0E1E30',
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: '#1E3550',
-    marginBottom: 10,
-    overflow: 'hidden',
+    flexDirection: 'row', backgroundColor: '#0E1E30', borderRadius: 14,
+    borderWidth: 1.5, borderColor: '#1E3550', marginBottom: 10, overflow: 'hidden',
   },
-  charColorBar: {
-    width: 6,
-  },
-  charCardBody: {
-    flex: 1,
-    padding: 12,
-    gap: 4,
-  },
-  charCardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  charCardName: {
-    color: '#E6F7FF',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  charBadge: {
-    borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-  },
-  charBadgeOwned: {
-    backgroundColor: '#1E3550',
-  },
-  charBadgeEquipped: {
-    backgroundColor: '#1B4D2A',
-  },
-  charBadgeLocked: {
-    backgroundColor: '#2A2A40',
-    borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-  },
-  charBadgeText: {
-    color: '#CFE8FF',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  charCardDesc: {
-    color: '#7FA8C7',
-    fontSize: 12,
-  },
-  charCardSub: {
-    color: '#4E7490',
-    fontSize: 12,
-  },
+  charColorBar: { width: 6 },
+  charCardBody: { flex: 1, padding: 12, gap: 4 },
+  charCardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  charCardName: { color: '#E6F7FF', fontWeight: '700', fontSize: 15 },
+  charBadge: { borderRadius: 20, paddingHorizontal: 10, paddingVertical: 3 },
+  charBadgeOwned: { backgroundColor: '#1E3550' },
+  charBadgeEquipped: { backgroundColor: '#1B4D2A' },
+  charBadgeLocked: { backgroundColor: '#2A2A40', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 3 },
+  charBadgeText: { color: '#CFE8FF', fontSize: 11, fontWeight: '700' },
+  charCardDesc: { color: '#7FA8C7', fontSize: 12 },
+  charCardSub: { color: '#4E7490', fontSize: 12 },
 
   // ── Shared ────────────────────────────────────────────────────────────────
   messageBanner: {
-    backgroundColor: '#0E2820',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#2E7048',
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    marginHorizontal: 0,
-    marginBottom: 14,
+    backgroundColor: '#0E2820', borderRadius: 10, borderWidth: 1, borderColor: '#2E7048',
+    paddingVertical: 10, paddingHorizontal: 14, marginBottom: 14, alignItems: 'center',
+  },
+  messageText: { color: '#7ED8A0', fontWeight: '700', fontSize: 13, textAlign: 'center' },
+
+  // ── Skydive ────────────────────────────────────────────────────────────────
+  skyBg: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#0A2A5C',
+  },
+  skyCloud: {
+    position: 'absolute',
+    backgroundColor: '#FFFFFFAA',
+  },
+  gateRow: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 22,
+    flexDirection: 'row',
     alignItems: 'center',
   },
-  messageText: {
-    color: '#7ED8A0',
-    fontWeight: '700',
-    fontSize: 13,
+  gateWall: {
+    height: 22,
+    backgroundColor: '#FF4444',
+    opacity: 0.85,
+    borderRadius: 4,
+  },
+  gateGap: {
+    flex: 1,
+    height: 22,
+    borderTopWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: '#00E5C8',
+  },
+  skydiver: {
+    position: 'absolute',
+    top: '78%',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 3,
+    borderColor: '#FFFFFF66',
+  },
+  skyHud: {
+    position: 'absolute',
+    top: 12,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  skyHudText: {
+    color: '#00E5C8',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  skyHint: {
+    position: 'absolute',
+    bottom: 14,
+    left: 0,
+    right: 0,
     textAlign: 'center',
+    color: '#1A4A7A',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+
+  // ── Box Race ──────────────────────────────────────────────────────────────
+  raceTrack: {
+    ...StyleSheet.absoluteFill,
+    marginHorizontal: '8%',
+    backgroundColor: '#1A1000',
+    borderRadius: 0,
+  },
+  raceEdge: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 6,
+    backgroundColor: '#FFB830',
+    opacity: 0.7,
+  },
+  boostPad: {
+    position: 'absolute',
+    width: 36,
+    height: 36,
+    borderRadius: 6,
+    backgroundColor: '#1A3A00',
+    borderWidth: 2,
+    borderColor: '#88FF44',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  boostEmoji: { fontSize: 18 },
+  rivalBox: {
+    position: 'absolute',
+    width: 44,
+    height: 44,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: '#FFFFFF33',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rivalBoxEmoji: { fontSize: 24 },
+  playerBox: {
+    position: 'absolute',
+    top: '82%',
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    borderWidth: 3,
+    borderColor: '#FFFFFF99',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playerBoxEmoji: { fontSize: 26 },
+  raceHint: {
+    position: 'absolute',
+    bottom: 14,
+    left: 0,
+    right: 0,
+    textAlign: 'center',
+    color: '#4A3000',
+    fontWeight: '700',
+    fontSize: 12,
   },
 });
