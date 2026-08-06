@@ -10,6 +10,7 @@ import {
   StyleSheet,
   Text,
   View,
+  type ViewStyle,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
@@ -1055,12 +1056,7 @@ export default function App() {
   const renderActionCharacter = (
     pose: 'surf' | 'skate' | 'sky' | 'race',
     character: Character,
-    positionStyle: {
-      left: `${number}%`;
-      top?: `${number}%`;
-      bottom?: `${number}%`;
-      transform?: { rotate?: string; scale?: number }[];
-    },
+    positionStyle: ViewStyle,
   ) => (
     <View style={[styles.actionCharacterWrap, positionStyle]}>
       <View style={[styles.actionCharacterGlow, { backgroundColor: character.accentColor }]} />
@@ -1777,7 +1773,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   heroBackdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#09192D',
   },
   heroGlow: {
@@ -2027,7 +2023,7 @@ const styles = StyleSheet.create({
 
   // ── Surf ──────────────────────────────────────────────────────────────────
   surfSky: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#08233A',
   },
   surfSun: {
@@ -2104,7 +2100,7 @@ const styles = StyleSheet.create({
 
   // ── Skate ─────────────────────────────────────────────────────────────────
   skateSky: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#1B0F1F',
   },
   skateSun: {
@@ -2303,7 +2299,7 @@ const styles = StyleSheet.create({
     opacity: 0.2,
   },
   characterPortraitSky: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     opacity: 0.9,
   },
   characterPortraitSun: {
