@@ -1,16 +1,79 @@
 # ReallyFunMoblleApp
 
-Pulse Drift is a cross-platform mobile arcade game (Android + iOS) built with Expo + React Native.
+Retro Rush Festival is a cross-platform mobile arcade game (Android + iOS) built with Expo + React Native.
 
-## What was built
+It is inspired by classic multi-sport arcade collections (surfing/skating/hackey style) and adds progression + monetization loops suitable for modern mobile testing.
 
-- **Original gameplay twist:** lane-dodging survival inspired by mainstream endless runners, but with a tactical system:
-  - 3-lane obstacle dodging
-  - built-in shield mechanics
-  - optional rewarded-ad boosts that grant shield + slow motion
-- **Rewarded ad support:** Google Mobile Ads integration using test ad units for safe development/testing.
-- **Cross-platform setup:** Android and iOS configuration included.
-- **Immediate testing flow:** Expo local testing + EAS internal distribution build profiles.
+## What is included
+
+- **Three playable retro-inspired modes**
+  - **Surf Sprint** (steady lane rhythm)
+  - **Skate Rush** (faster obstacle pace)
+  - **Hackey Flow** (more frequent spawns)
+- **Character customization + progression**
+  - Starter and premium characters with gameplay perks
+  - Character unlocks purchased using in-game tokens
+- **Token economy sources**
+  - Earned from completing runs
+  - Earned from rewarded ads
+  - Added through a dev monetization token-pack simulation button
+- **Rewarded ads integration**
+  - Uses `react-native-google-mobile-ads`
+  - Configured with Google test IDs for safe development
+- **Full in-app instructions panel**
+  - Core controls, progression flow, mode-specific guidance, and account roadmap note
+
+## Full gameplay instructions
+
+1. Start a run in one of the sport modes.
+2. Use **Left** and **Right** buttons to switch lanes.
+3. Avoid incoming obstacles.
+4. If you have shields, impacts consume shields first.
+5. Survive longer to increase score and earn more tokens on run end.
+6. Use **Watch Ad** for bonus tokens + temporary gameplay benefits.
+7. Spend tokens on better characters to improve survivability.
+8. Restart after run end and continue progression.
+
+### Mode switching
+
+- Sport mode switching is limited to between runs.
+- This keeps each run fair and mode-specific.
+
+### Character unlock/equip flow
+
+- Tap a locked character to buy with tokens.
+- Tap an owned character to equip.
+- Character perks include starting shield and slow-motion bonus duration improvements.
+
+## Monetization/testing flow
+
+### Rewarded ads
+
+- Tap **Watch Ad: +Tokens +Boost** when ad is loaded.
+- Reward grants:
+  - tokens
+  - shield
+  - slow-motion boost
+
+### Paid revenue simulation (dev)
+
+- Tap **Buy Token Pack (+300, dev test)** to simulate paid currency top-up.
+- For production, replace this with real in-app purchases:
+  - Google Play Billing (Android)
+  - StoreKit (iOS)
+
+## User accounts roadmap (Google/Apple)
+
+Current build includes account-readiness guidance in-app and in docs.
+
+Next recommended implementation phase:
+- Google Sign-In for Android
+- Sign in with Apple for iOS
+- Persist cloud profile:
+  - tokens
+  - owned characters
+  - purchase history
+  - leaderboard/progression data
 
 ## Quick start
 
@@ -22,51 +85,50 @@ Pulse Drift is a cross-platform mobile arcade game (Android + iOS) built with Ex
    ```bash
    npm run start
    ```
-3. Run on device/emulator:
+3. Run on emulator/device:
    ```bash
    npm run android
    npm run ios
    ```
 
-## Rewarded ads behavior
+## Type checks
 
-- Tap **Watch Reward Ad** when loaded.
-- Completing the rewarded ad grants:
-  - `+1 Shield`
-  - `20s Slow Motion`
+```bash
+npm run typecheck
+```
 
-> The app is configured with Google **test** app IDs and test rewarded ad unit IDs. Replace them with your own production IDs before store release.
+## SDK-style downloadable internal test builds
 
-## SDK-style downloadable test builds (internal distribution)
+This repository includes `eas.json` build profiles for installable testing artifacts.
 
-This repo includes `eas.json` profiles so you can generate installable builds quickly.
-
-### Android downloadable build
+### Android internal build
 
 ```bash
 npm run build:android:preview
 ```
 
-### iOS internal test build
+### iOS internal build
 
 ```bash
 npm run build:ios:preview
 ```
 
-After each build completes, Expo/EAS provides a downloadable artifact/install link for immediate mobile testing.
+After build completion, Expo/EAS provides downloadable install links/artifacts for immediate mobile testing.
 
 ## Project scripts
 
 - `npm run start` — start Expo dev server
 - `npm run android` — launch Android target
 - `npm run ios` — launch iOS target
-- `npm run web` — run web target
+- `npm run web` — launch web target
 - `npm run typecheck` — run TypeScript checks
 - `npm run build:android:preview` — create Android internal-distribution build
 - `npm run build:ios:preview` — create iOS internal-distribution build
 
-## Notes before production release
+## Production checklist
 
-- Replace all test ad IDs with production IDs from AdMob.
-- Configure real bundle/package identifiers.
-- Test rewarded flow on physical Android and iOS devices.
+- Replace all ad test IDs with production AdMob IDs.
+- Implement real IAP and server-side purchase validation.
+- Add Google/Apple account auth and secure cloud save.
+- Add anti-cheat safeguards for economy values.
+- Test on physical Android and iOS devices.
