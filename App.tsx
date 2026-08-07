@@ -67,6 +67,60 @@ type Character = {
   bonusDescription: string;
 };
 
+type ModeProgress = {
+  points: number;
+  totalRuns: number;
+  challengeCompletions: number;
+  dailyCompletedDate: string | null;
+};
+
+type DailyObjectiveId =
+  | 'score'
+  | 'aerials'
+  | 'barrels'
+  | 'styles'
+  | 'lands'
+  | 'perfects'
+  | 'combo'
+  | 'gates'
+  | 'slipstreams'
+  | 'boosts';
+
+type DailyChallenge = {
+  dayKey: string;
+  mode: GameModeKey;
+  badge: string;
+  modifierId: string;
+  modifierName: string;
+  modifierText: string;
+  objectiveId: DailyObjectiveId;
+  objectiveText: string;
+  objectiveTarget: number;
+  rewardTokens: number;
+};
+
+type SaveState = {
+  bestScores: Record<GameModeKey, number>;
+  tokens: number;
+  lifetimeTokens: number;
+  ownedCharacters: string[];
+  selectedCharacterId: string;
+  modeProgress: Record<GameModeKey, ModeProgress>;
+};
+
+type RunEndMeta = {
+  payoutTokens: number;
+  challengeTokens: number;
+  masteryTokens: number;
+  masteryPointsGained: number;
+  bestDelta: number;
+  challengeCompleted: boolean;
+  objectiveProgress: number;
+  objectiveTarget: number;
+  levelBefore: number;
+  levelAfter: number;
+};
+
 // ── Surf game state ───
 type WaveZone = { id: number; x: number; width: number }; // x: 0-1, width: 0-1
 
@@ -191,12 +245,174 @@ const CHARACTERS: Character[] = [
   },
 ];
 
+const SAVE_FILE = `${FileSystem.documentDirectory ?? ''}retro-rush-save.json`;
+const MODE_ORDER: GameModeKey[] = ['surf', 'skate', 'hackey', 'skydive', 'boxrace'];
+const MODE_MASTERIES = {
+  surf: ['Breakwater Rookie', 'Point Break Local', 'Tube Poster', 'Sponsor Wave', 'Festival Legend'],
+  skate: ['Ramp Rookie', 'Park Local', 'Deck Poster', 'Sponsor Session', 'Festival Legend'],
+  hackey: ['Circle Rookie', 'Jam Local', 'Glow Poster', 'Sponsor Rhythm', 'Festival Legend'],
+  skydive: ['Drop Rookie', 'Wind Local', 'Cloud Poster', 'Sponsor Altitude', 'Festival Legend'],
+  boxrace: ['Track Rookie', 'Grid Local', 'Pit Poster', 'Sponsor Turbo', 'Festival Legend'],
+} as const satisfies Record<GameModeKey, readonly string[]>;
+const MASTERY_LEVELS = [
+  { points: 0, tokenReward: 0, rewardText: 'Starter stamp' },
+  { points: 1, tokenReward: 15, rewardText: 'Sponsor drop: +15 tokens' },
+  { points: 3, tokenReward: 20, rewardText: 'Mode poster cosmetic unlocked' },
+  { points: 6, tokenReward: 25, rewardText: 'Daily reward boost unlocked' },
+  { points: 10, tokenReward: 35, rewardText: 'Legend aura cosmetic unlocked' },
+] as const;
+const DAILY_MODIFIERS = {
+  surf: [
+    { id: 'drift-current', name: 'Cross Current', text: 'A side current slowly pushes your line across the wave.' },
+    { id: 'squall-lines', name: 'Squall Lines', text: 'Whitewater sections arrive faster and roll wider.' },
+    { id: 'air-festival', name: 'Air Festival', text: 'Aerials cash out bigger, but the wave stays twitchy.' },
+  ],
+  skate: [
+    { id: 'low-gravity', name: 'Low Gravity', text: 'Hang time lasts longer, creating slower airborne reads.' },
+    { id: 'rail-jam', name: 'Rail Jam', text: 'Rails show up constantly to change line choices.' },
+    { id: 'trick-frenzy', name: 'Trick Frenzy', text: 'Called tricks pay extra, rewarding aggressive launches.' },
+  ],
+  hackey: [
+    { id: 'hot-potato', name: 'Hot Potato', text: 'The sack drains faster, forcing quick decisions.' },
+    { id: 'echo-target', name: 'Echo Target', text: 'Correct taps can repeat the same player for rhythm loops.' },
+    { id: 'focus-ring', name: 'Focus Ring', text: 'Perfect taps are worth more, but the perfect lane is tighter.' },
+  ],
+  skydive: [
+    { id: 'jetstream', name: 'Jetstream', text: 'A wind lane drifts your diver off-centre over time.' },
+    { id: 'ring-rush', name: 'Ring Rush', text: 'Gate spawns speed up and rewards spike for clean lines.' },
+    { id: 'cloudburst', name: 'Cloudburst', text: 'Turbulence clusters are denser and more frequent.' },
+  ],
+  boxrace: [
+    { id: 'sidewind', name: 'Sidewind', text: 'The kart gets nudged sideways unless you keep correcting.' },
+    { id: 'boost-parade', name: 'Boost Parade', text: 'Pads appear faster to create risk-reward racing lines.' },
+    { id: 'turbo-grid', name: 'Turbo Grid', text: 'Rivals charge harder and the grid gets busier sooner.' },
+  ],
+} as const satisfies Record<GameModeKey, readonly { id: string; name: string; text: string }[]>;
+const DAILY_OBJECTIVES = {
+  surf: [
+    { id: 'aerials', text: 'Land 3 aerials', target: 3 },
+    { id: 'barrels', text: 'Trigger 2 barrels', target: 2 },
+    { id: 'score', text: 'Score 450+', target: 450 },
+  ],
+  skate: [
+    { id: 'styles', text: 'Land 2 style bonuses', target: 2 },
+    { id: 'lands', text: 'Stick 4 landings', target: 4 },
+    { id: 'score', text: 'Score 500+', target: 500 },
+  ],
+  hackey: [
+    { id: 'perfects', text: 'Hit 5 perfect taps', target: 5 },
+    { id: 'combo', text: 'Reach combo x12', target: 12 },
+    { id: 'score', text: 'Score 350+', target: 350 },
+  ],
+  skydive: [
+    { id: 'gates', text: 'Clear 8 gates', target: 8 },
+    { id: 'perfects', text: 'Thread 3 perfect gates', target: 3 },
+    { id: 'score', text: 'Score 450+', target: 450 },
+  ],
+  boxrace: [
+    { id: 'slipstreams', text: 'Trigger 3 slipstreams', target: 3 },
+    { id: 'boosts', text: 'Collect 4 boosts', target: 4 },
+    { id: 'score', text: 'Score 500+', target: 500 },
+  ],
+} as const satisfies Record<GameModeKey, readonly { id: DailyObjectiveId; text: string; target: number }[]>;
+const DAILY_BADGES: Record<GameModeKey, string> = {
+  surf: '🌊',
+  skate: '🛹',
+  hackey: '🤸',
+  skydive: '🪂',
+  boxrace: '📦',
+};
+const createDefaultModeProgress = (): Record<GameModeKey, ModeProgress> => ({
+  surf: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+  skate: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+  hackey: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+  skydive: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+  boxrace: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+});
+const getMasteryLevel = (points: number) => {
+  let level = 0;
+  for (let i = 0; i < MASTERY_LEVELS.length; i += 1) {
+    if (points >= MASTERY_LEVELS[i].points) level = i;
+  }
+  return level;
+};
+const getNextMasteryTier = (points: number) =>
+  MASTERY_LEVELS.find((tier) => tier.points > points) ?? null;
+const sumLevelRewards = (fromLevel: number, toLevel: number) => {
+  let total = 0;
+  for (let level = fromLevel + 1; level <= toLevel; level += 1) {
+    total += MASTERY_LEVELS[level]?.tokenReward ?? 0;
+  }
+  return total;
+};
+const getDailySeed = (dayKey: string) =>
+  Array.from(dayKey).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+const buildDailyChallenge = (mode: GameModeKey, dayKey: string): DailyChallenge => {
+  const modeIndex = MODE_ORDER.indexOf(mode);
+  const seed = getDailySeed(dayKey);
+  const modifier = DAILY_MODIFIERS[mode][(seed + modeIndex * 5) % DAILY_MODIFIERS[mode].length];
+  const objective = DAILY_OBJECTIVES[mode][(seed * 3 + modeIndex * 7) % DAILY_OBJECTIVES[mode].length];
+  return {
+    dayKey,
+    mode,
+    badge: DAILY_BADGES[mode],
+    modifierId: modifier.id,
+    modifierName: modifier.name,
+    modifierText: modifier.text,
+    objectiveId: objective.id,
+    objectiveText: objective.text,
+    objectiveTarget: objective.target,
+    rewardTokens: 28 + modeIndex * 6,
+  };
+};
+
 // ─── Helper ───────────────────────────────────────────────────────────────────
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const applyGestureDeadzone = (distance: number) =>
   Math.abs(distance) <= DRAG_DEADZONE_PX
     ? 0
     : distance - Math.sign(distance) * DRAG_DEADZONE_PX;
+const getObjectiveProgress = (
+  objectiveId: DailyObjectiveId,
+  scoreValue: number,
+  stats: {
+    aerials?: number;
+    barrelRides?: number;
+    styleBonuses?: number;
+    cleanLandings?: number;
+    perfectTaps?: number;
+    maxCombo?: number;
+    gatesCleared?: number;
+    perfectThreads?: number;
+    slipstreams?: number;
+    boostsCollected?: number;
+  },
+) => {
+  switch (objectiveId) {
+    case 'score':
+      return scoreValue;
+    case 'aerials':
+      return stats.aerials ?? 0;
+    case 'barrels':
+      return stats.barrelRides ?? 0;
+    case 'styles':
+      return stats.styleBonuses ?? 0;
+    case 'lands':
+      return stats.cleanLandings ?? 0;
+    case 'perfects':
+      return (stats.perfectTaps ?? 0) + (stats.perfectThreads ?? 0);
+    case 'combo':
+      return stats.maxCombo ?? 0;
+    case 'gates':
+      return stats.gatesCleared ?? 0;
+    case 'slipstreams':
+      return stats.slipstreams ?? 0;
+    case 'boosts':
+      return stats.boostsCollected ?? 0;
+    default:
+      return 0;
+  }
+};
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -210,6 +426,22 @@ export default function App() {
     surf: 0, skate: 0, hackey: 0, skydive: 0, boxrace: 0,
   });
   const [isPlaying, setIsPlaying] = useState(false);
+  const [modeProgress, setModeProgress] = useState<Record<GameModeKey, ModeProgress>>(createDefaultModeProgress());
+  const [saveReady, setSaveReady] = useState(false);
+  const dayKey = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const dailyChallenges = useMemo<Record<GameModeKey, DailyChallenge>>(
+    () => ({
+      surf: buildDailyChallenge('surf', dayKey),
+      skate: buildDailyChallenge('skate', dayKey),
+      hackey: buildDailyChallenge('hackey', dayKey),
+      skydive: buildDailyChallenge('skydive', dayKey),
+      boxrace: buildDailyChallenge('boxrace', dayKey),
+    }),
+    [dayKey],
+  );
+  const [activeDailyChallenge, setActiveDailyChallenge] = useState<DailyChallenge | null>(null);
+  const activeDailyChallengeRef = useRef<DailyChallenge | null>(null);
+  const [runEndMeta, setRunEndMeta] = useState<RunEndMeta | null>(null);
 
   // ── economy ───────────────────────────────────────────────────────────────
   const [tokens, setTokens] = useState(0);
@@ -233,6 +465,7 @@ export default function App() {
   const rewardedAtGameOverRef = useRef(false);
   const runStartBestRef = useRef(0);
   const isPlayingRef = useRef(false);
+  const hasRunStartedRef = useRef(false);
 
   // ── Surf state ────────────────────────────────────────────────────────────
   const [surferX, setSurferX] = useState(0.5);          // 0-1 across wave face
@@ -327,6 +560,8 @@ export default function App() {
   const [runSummary, setRunSummary] = useState<{
     maxCombo?: number; gatesCleared?: number; barrelRides?: number;
     styleBonuses?: number; maxSpeed?: number; slipstreams?: number;
+    aerials?: number; cleanLandings?: number; perfectTaps?: number;
+    perfectThreads?: number; boostsCollected?: number;
   }>({});
   const runSummaryRef = useRef<typeof runSummary>({});
 
@@ -361,6 +596,67 @@ export default function App() {
       // silently swallow
     }
   }, [logFilePath]);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadSave = async () => {
+      try {
+        const info = await FileSystem.getInfoAsync(SAVE_FILE);
+        if (!info.exists) {
+          if (mounted) setSaveReady(true);
+          return;
+        }
+        const raw = await FileSystem.readAsStringAsync(SAVE_FILE);
+        const parsed = JSON.parse(raw) as Partial<SaveState>;
+        if (!mounted) return;
+        if (parsed.bestScores) {
+          setBestScores((current) => ({ ...current, ...parsed.bestScores }));
+        }
+        if (typeof parsed.tokens === 'number') setTokens(parsed.tokens);
+        if (typeof parsed.lifetimeTokens === 'number') setLifetimeTokens(parsed.lifetimeTokens);
+        if (Array.isArray(parsed.ownedCharacters) && parsed.ownedCharacters.length > 0) {
+          setOwnedCharacters(parsed.ownedCharacters);
+        }
+        if (typeof parsed.selectedCharacterId === 'string') {
+          setSelectedCharacterId(parsed.selectedCharacterId);
+        }
+        if (parsed.modeProgress) {
+          setModeProgress({
+            ...createDefaultModeProgress(),
+            ...parsed.modeProgress,
+          });
+        }
+      } catch (error) {
+        void appendErrorLog(error, 'LoadSaveState');
+      } finally {
+        if (mounted) setSaveReady(true);
+      }
+    };
+    void loadSave();
+    return () => {
+      mounted = false;
+    };
+  }, [appendErrorLog]);
+
+  useEffect(() => {
+    if (!saveReady) return;
+    const persist = async () => {
+      try {
+        const payload: SaveState = {
+          bestScores,
+          tokens,
+          lifetimeTokens,
+          ownedCharacters,
+          selectedCharacterId,
+          modeProgress,
+        };
+        await FileSystem.writeAsStringAsync(SAVE_FILE, JSON.stringify(payload));
+      } catch (error) {
+        void appendErrorLog(error, 'PersistSaveState');
+      }
+    };
+    void persist();
+  }, [appendErrorLog, bestScores, lifetimeTokens, modeProgress, ownedCharacters, saveReady, selectedCharacterId, tokens]);
 
   useEffect(() => {
     const errorUtils = (
@@ -416,13 +712,63 @@ export default function App() {
 
   // ─── Payout on game over ──────────────────────────────────────────────────
   useEffect(() => {
-    if (isPlaying || rewardedAtGameOverRef.current) return;
+    if (isPlaying || rewardedAtGameOverRef.current || !hasRunStartedRef.current) return;
     rewardedAtGameOverRef.current = true;
-    const runPayout = Math.max(5, Math.floor(score / 8) * activeMode.tokenMultiplier);
-    setTokens((c) => c + runPayout);
-    setLifetimeTokens((c) => c + runPayout);
-    setMessage(`Run complete! +${runPayout} tokens from ${activeMode.name}.`);
-  }, [activeMode.name, activeMode.tokenMultiplier, isPlaying, score]);
+    const challenge = activeDailyChallengeRef.current;
+    const currentProgress = modeProgress[selectedMode];
+    const previousLevel = getMasteryLevel(currentProgress.points);
+    const runPayout = Math.max(8, Math.floor(score / 8) * activeMode.tokenMultiplier);
+    const bestDelta = score - runStartBestRef.current;
+    const objectiveProgress = challenge
+      ? getObjectiveProgress(challenge.objectiveId, score, runSummaryRef.current)
+      : 0;
+    const challengeCompleted = Boolean(challenge && objectiveProgress >= challenge.objectiveTarget);
+    const sponsorBonus = previousLevel >= 3 ? 10 : 0;
+    const challengeTokens = challengeCompleted && currentProgress.dailyCompletedDate !== challenge?.dayKey
+      ? (challenge?.rewardTokens ?? 0) + sponsorBonus
+      : 0;
+    const masteryPointsGained =
+      1
+      + (score >= MILESTONES[selectedMode][0] ? 1 : 0)
+      + (bestDelta > 0 ? 1 : 0)
+      + (challengeCompleted ? 2 : 0);
+    const nextPoints = currentProgress.points + masteryPointsGained;
+    const nextLevel = getMasteryLevel(nextPoints);
+    const masteryTokens = sumLevelRewards(previousLevel, nextLevel);
+
+    setTokens((c) => c + runPayout + challengeTokens + masteryTokens);
+    setLifetimeTokens((c) => c + runPayout + challengeTokens + masteryTokens);
+    setModeProgress((current) => ({
+      ...current,
+      [selectedMode]: {
+        ...current[selectedMode],
+        points: nextPoints,
+        totalRuns: current[selectedMode].totalRuns + 1,
+        challengeCompletions: current[selectedMode].challengeCompletions + (challengeTokens > 0 ? 1 : 0),
+        dailyCompletedDate: challengeTokens > 0 ? challenge?.dayKey ?? current[selectedMode].dailyCompletedDate : current[selectedMode].dailyCompletedDate,
+      },
+    }));
+    setRunEndMeta({
+      payoutTokens: runPayout,
+      challengeTokens,
+      masteryTokens,
+      masteryPointsGained,
+      bestDelta,
+      challengeCompleted,
+      objectiveProgress,
+      objectiveTarget: challenge?.objectiveTarget ?? 0,
+      levelBefore: previousLevel,
+      levelAfter: nextLevel,
+    });
+    if (challengeCompleted && challengeTokens > 0) {
+      setMessage(`Daily clear! +${runPayout + challengeTokens + masteryTokens} tokens banked.`);
+    } else if (challengeCompleted) {
+      setMessage(`Daily objective cleared again. +${runPayout + masteryTokens} tokens banked.`);
+    } else {
+      setMessage(`Run complete! +${runPayout + masteryTokens} tokens from ${activeMode.name}.`);
+    }
+    hasRunStartedRef.current = false;
+  }, [activeMode.name, activeMode.tokenMultiplier, isPlaying, modeProgress, score, selectedMode]);
 
   // ─── Sync refs ────────────────────────────────────────────────────────────
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
@@ -444,6 +790,7 @@ export default function App() {
   useEffect(() => { barrelActiveRef.current = barrelActive; }, [barrelActive]);
   useEffect(() => { barrelHoldTicksRef.current = barrelHoldTicks; }, [barrelHoldTicks]);
   useEffect(() => { diffStageRef.current = diffStage; }, [diffStage]);
+  useEffect(() => { activeDailyChallengeRef.current = activeDailyChallenge; }, [activeDailyChallenge]);
   // ══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'surf') return;
@@ -464,6 +811,15 @@ export default function App() {
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
+      const challengeModifier = activeDailyChallengeRef.current?.mode === 'boxrace'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
+      const challengeModifier = activeDailyChallengeRef.current?.mode === 'hackey'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
+      const surfModifier = activeDailyChallengeRef.current?.mode === 'surf'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
 
       // Difficulty stage
       const stage = tickRef.current >= STAGE3_TICK ? 3 : tickRef.current >= STAGE2_TICK ? 2 : 1;
@@ -488,7 +844,8 @@ export default function App() {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
-      const stageSpeed = stage === 3 ? SURF.WAVE_SPEED_S3 : stage === 2 ? SURF.WAVE_SPEED_S2 : SURF.WAVE_SPEED_S1;
+      let stageSpeed = stage === 3 ? SURF.WAVE_SPEED_S3 : stage === 2 ? SURF.WAVE_SPEED_S2 : SURF.WAVE_SPEED_S1;
+      if (surfModifier === 'squall-lines') stageSpeed += 0.002;
       const speed = slowMotionSeconds > 0 ? stageSpeed * SLOW_MOTION_SPEED_MULT : stageSpeed;
 
       // Barrel mechanic: holding sweet zone
@@ -519,8 +876,13 @@ export default function App() {
       }
 
       // Stage-based spawn interval
-      const spawnInterval = stage === 3 ? SURF.ZONE_SPAWN_S3 : stage === 2 ? SURF.ZONE_SPAWN_S2 : SURF.ZONE_SPAWN_S1;
-      const { min: wMin, max: wMax } = stage === 3 ? SURF.ZONE_WIDTH_S3 : stage === 2 ? SURF.ZONE_WIDTH_S2 : SURF.ZONE_WIDTH_S1;
+      let spawnInterval = stage === 3 ? SURF.ZONE_SPAWN_S3 : stage === 2 ? SURF.ZONE_SPAWN_S2 : SURF.ZONE_SPAWN_S1;
+      let { min: wMin, max: wMax } = stage === 3 ? SURF.ZONE_WIDTH_S3 : stage === 2 ? SURF.ZONE_WIDTH_S2 : SURF.ZONE_WIDTH_S1;
+      if (surfModifier === 'squall-lines') {
+        spawnInterval = Math.max(18, spawnInterval - 8);
+        wMin += 0.02;
+        wMax += 0.025;
+      }
 
       // Move / spawn whitewater zones
       setWaveZones((current) => {
@@ -539,6 +901,12 @@ export default function App() {
 
       // Wave animation phase
       surfWavePhase.current += 0.04;
+      if (surfModifier === 'drift-current') {
+        const drift = Math.sin(tickRef.current / 18) * 0.0055;
+        const nextX = clamp(surferXRef.current + drift, 0.05, 0.95);
+        surferXRef.current = nextX;
+        setSurferX(nextX);
+      }
 
       // Check collision: surfer at surferXRef.current hits a zone?
       setWaveZones((zones) => {
@@ -597,7 +965,10 @@ export default function App() {
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'skate') return;
 
-    const GRAVITY = SKATE.GRAVITY;
+    const challengeModifier = activeDailyChallengeRef.current?.mode === 'skate'
+      ? activeDailyChallengeRef.current.modifierId
+      : null;
+    const GRAVITY = challengeModifier === 'low-gravity' ? SKATE.GRAVITY * 0.8 : SKATE.GRAVITY;
     const FRICTION = SKATE.FRICTION;
     const PIPE_RADIUS = SKATE.PIPE_RADIUS;
 
@@ -683,6 +1054,7 @@ export default function App() {
             setMessage(`Landed! +${landBonus} pts`);
             triggerAudioHook(AUDIO_HOOKS.skate.LAND, 260);
           }
+          runSummaryRef.current = { ...runSummaryRef.current, cleanLandings: (runSummaryRef.current.cleanLandings ?? 0) + 1 };
           if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
           // Reset style meter after landing
           stylePhaseRef.current = 0;
@@ -717,7 +1089,8 @@ export default function App() {
           }
           if (skateTrickTimeoutRef.current) clearTimeout(skateTrickTimeoutRef.current);
           skateTrickTimeoutRef.current = setTimeout(() => setSkateTrick(null), SKATE.TRICK_DISPLAY_MS);
-          const railSpawnChance = stage === 3 ? SKATE.RAIL_SPAWN_CHANCE_S3 : stage === 2 ? SKATE.RAIL_SPAWN_CHANCE_S2 : SKATE.RAIL_SPAWN_CHANCE_S1;
+          let railSpawnChance = stage === 3 ? SKATE.RAIL_SPAWN_CHANCE_S3 : stage === 2 ? SKATE.RAIL_SPAWN_CHANCE_S2 : SKATE.RAIL_SPAWN_CHANCE_S1;
+          if (challengeModifier === 'rail-jam') railSpawnChance = Math.min(1, railSpawnChance + 0.3);
           if (Math.random() < railSpawnChance) {
             setSkateRails((r) => [
               ...r.slice(-2),
@@ -772,8 +1145,9 @@ export default function App() {
       }
 
       const stageDrain = stage === 3 ? HACKEY.BASE_DRAIN_S3 : stage === 2 ? HACKEY.BASE_DRAIN_S2 : HACKEY.BASE_DRAIN_S1;
-      const drain = (slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1) * stageDrain *
+      let drain = (slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1) * stageDrain *
         (1 + hackeyCombo * HACKEY.COMBO_DRAIN_FACTOR);
+      if (challengeModifier === 'hot-potato') drain *= 1.18;
       const newWindow = hackeyWindowRef.current - drain;
 
       if (newWindow <= 0) {
@@ -850,6 +1224,9 @@ export default function App() {
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
+      const challengeModifier = activeDailyChallengeRef.current?.mode === 'skydive'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
       setScore((c) => {
         const next = c + 1;
         checkMilestones(next);
@@ -877,10 +1254,13 @@ export default function App() {
       const stage = diffStageRef.current;
       const GATE_GAP = (stage === 3 ? SKYDIVE.GATE_GAP_S3 : stage === 2 ? SKYDIVE.GATE_GAP_S2 : SKYDIVE.GATE_GAP_S1)
         + activeCharacter.controlBonus * SKYDIVE.CONTROL_GAP_BONUS_MULT;
-      const stageSpeed = stage === 3 ? SKYDIVE.SPEED_S3 : stage === 2 ? SKYDIVE.SPEED_S2 : SKYDIVE.SPEED_S1;
+      let stageSpeed = stage === 3 ? SKYDIVE.SPEED_S3 : stage === 2 ? SKYDIVE.SPEED_S2 : SKYDIVE.SPEED_S1;
+      if (challengeModifier === 'ring-rush') stageSpeed += 0.0015;
       const speed = stageSpeed * (slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1);
-      const gateSpawn = stage === 3 ? SKYDIVE.GATE_SPAWN_S3 : stage === 2 ? SKYDIVE.GATE_SPAWN_S2 : SKYDIVE.GATE_SPAWN_S1;
-      const cloudSpawn = stage === 3 ? SKYDIVE.CLOUD_SPAWN_S3 : stage === 2 ? SKYDIVE.CLOUD_SPAWN_S2 : SKYDIVE.CLOUD_SPAWN_S1;
+      let gateSpawn = stage === 3 ? SKYDIVE.GATE_SPAWN_S3 : stage === 2 ? SKYDIVE.GATE_SPAWN_S2 : SKYDIVE.GATE_SPAWN_S1;
+      let cloudSpawn = stage === 3 ? SKYDIVE.CLOUD_SPAWN_S3 : stage === 2 ? SKYDIVE.CLOUD_SPAWN_S2 : SKYDIVE.CLOUD_SPAWN_S1;
+      if (challengeModifier === 'ring-rush') gateSpawn = Math.max(16, gateSpawn - 6);
+      if (challengeModifier === 'cloudburst') cloudSpawn = Math.max(14, cloudSpawn - 8);
 
       setSkyGates((gates) => {
         const moved = gates
@@ -905,11 +1285,20 @@ export default function App() {
             id: Date.now() + Math.random(),
             x: Math.random(),
             y: -0.05,
-            r: SKYDIVE.CLOUD_RADIUS_MIN + Math.random() * (SKYDIVE.CLOUD_RADIUS_MAX - SKYDIVE.CLOUD_RADIUS_MIN),
+            r:
+              SKYDIVE.CLOUD_RADIUS_MIN
+              + Math.random() * (SKYDIVE.CLOUD_RADIUS_MAX - SKYDIVE.CLOUD_RADIUS_MIN)
+              + (challengeModifier === 'cloudburst' ? 0.015 : 0),
           });
         }
         return moved;
       });
+      if (challengeModifier === 'jetstream') {
+        const drift = Math.cos(tickRef.current / 14) * 0.006;
+        const nextX = clamp(skyXRef.current + drift, 0.05, 0.95);
+        skyXRef.current = nextX;
+        setSkyX(nextX);
+      }
 
       // Collision checks — gate
       setSkyGates((gates) => {
@@ -934,7 +1323,8 @@ export default function App() {
         }
         if (clearedGate) {
           const isPerfect = Math.abs(sx - clearedGate.gapX) <= SKYDIVE.PERFECT_CENTER_MARGIN;
-          const gateScore = isPerfect ? SKYDIVE.PERFECT_GATE_SCORE : SKYDIVE.GATE_SCORE;
+          const gateScore = (isPerfect ? SKYDIVE.PERFECT_GATE_SCORE : SKYDIVE.GATE_SCORE)
+            + (challengeModifier === 'ring-rush' ? 10 : 0);
           setSkyGatesCleared((c) => {
             const next = c + 1;
             runSummaryRef.current = { ...runSummaryRef.current, gatesCleared: next };
@@ -942,6 +1332,7 @@ export default function App() {
           });
           setScore((c) => c + gateScore);
           if (isPerfect) {
+            runSummaryRef.current = { ...runSummaryRef.current, perfectThreads: (runSummaryRef.current.perfectThreads ?? 0) + 1 };
             setLastGatePerfect(true);
             setMessage(`🎯 Perfect thread! +${gateScore}`);
             triggerAudioHook(AUDIO_HOOKS.skydive.GATE_PERFECT, 220);
@@ -1046,7 +1437,8 @@ export default function App() {
         setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
       }
 
-      const boxSpawn = stage === 3 ? BOXRACE.BOX_SPAWN_S3 : stage === 2 ? BOXRACE.BOX_SPAWN_S2 : BOXRACE.BOX_SPAWN_S1;
+      let boxSpawn = stage === 3 ? BOXRACE.BOX_SPAWN_S3 : stage === 2 ? BOXRACE.BOX_SPAWN_S2 : BOXRACE.BOX_SPAWN_S1;
+      if (challengeModifier === 'turbo-grid') boxSpawn = Math.max(14, boxSpawn - 6);
 
       setRacerSpeed((s) => {
         const next = Math.min(s + BOXRACE.SPEED_ACCEL, BOXRACE.MAX_SPEED);
@@ -1054,6 +1446,12 @@ export default function App() {
         return next;
       });
       const baseSpeed = slowMotionSeconds > 0 ? racerSpeed * SLOW_MOTION_SPEED_MULT : racerSpeed;
+      if (challengeModifier === 'sidewind') {
+        const drift = Math.sin(tickRef.current / 15) * 0.006;
+        const nextX = clamp(racerXRef.current + drift, 0.08, 0.92);
+        racerXRef.current = nextX;
+        setRacerX(nextX);
+      }
 
       // Slipstream mechanic: stay close behind a rival for bonus speed
       setRaceBoxes((boxes) => {
@@ -1096,7 +1494,10 @@ export default function App() {
             id: Date.now() + Math.random(),
             x: 0.1 + Math.random() * 0.7,
             y: -0.08,
-            speed: BOXRACE.RIVAL_SPEED_MIN + Math.random() * (BOXRACE.RIVAL_SPEED_MAX - BOXRACE.RIVAL_SPEED_MIN),
+            speed:
+              BOXRACE.RIVAL_SPEED_MIN
+              + Math.random() * (BOXRACE.RIVAL_SPEED_MAX - BOXRACE.RIVAL_SPEED_MIN)
+              + (challengeModifier === 'turbo-grid' ? 0.002 : 0),
             color: BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)],
           });
         }
@@ -1107,7 +1508,8 @@ export default function App() {
         const moved = boosts
           .map((b) => ({ ...b, y: b.y + baseSpeed }))
           .filter((b) => b.y < 1.05);
-        if (tickRef.current % BOXRACE.BOOST_SPAWN === 0) {
+        const boostSpawn = challengeModifier === 'boost-parade' ? Math.max(24, BOXRACE.BOOST_SPAWN - 22) : BOXRACE.BOOST_SPAWN;
+        if (tickRef.current % boostSpawn === 0) {
           moved.push({
             id: Date.now() + Math.random(),
             x: 0.15 + Math.random() * 0.65,
@@ -1171,6 +1573,7 @@ export default function App() {
           setScore((c) => c + BOXRACE.BOOST_SCORE);
           setMessage(`⚡ Boost! +${BOXRACE.BOOST_SCORE}`);
           triggerAudioHook(AUDIO_HOOKS.boxrace.BOOST, 220);
+          runSummaryRef.current = { ...runSummaryRef.current, boostsCollected: (runSummaryRef.current.boostsCollected ?? 0) + 1 };
           if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         }
         return hit ? boosts.filter((b) => b.id !== hit.id) : boosts;
@@ -1186,6 +1589,7 @@ export default function App() {
     rewardedAtGameOverRef.current = false;
     setScore(0);
     setMessage('');
+    setRunEndMeta(null);
     setSlowMotionSeconds(0);
     // Surf
     setSurferX(0.5);
@@ -1251,18 +1655,24 @@ export default function App() {
     diffStageRef.current = 1;
   }, []);
 
-  const startGame = useCallback((mode: GameModeKey) => {
+  const startGame = useCallback((mode: GameModeKey, dailyMode = false) => {
     resetGameState(mode);
     runStartBestRef.current = bestScores[mode];
+    const challenge = dailyMode ? dailyChallenges[mode] : null;
+    setActiveDailyChallenge(challenge);
     setSelectedMode(mode);
     setShields(activeCharacter.shieldBonus);
     setIsPlaying(true);
     isPlayingRef.current = true;
+    hasRunStartedRef.current = true;
     setScreen('game');
     if (controlsTipTimeoutRef.current) clearTimeout(controlsTipTimeoutRef.current);
     setShowControlsTip(true);
     controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), CONTROLS_TIP_DURATION_MS);
-  }, [resetGameState, activeCharacter.shieldBonus, bestScores]);
+    if (challenge) {
+      setMessage(`${challenge.badge} Daily: ${challenge.modifierName} • ${challenge.objectiveText}`);
+    }
+  }, [resetGameState, activeCharacter.shieldBonus, bestScores, dailyChallenges]);
 
   const restartGame = useCallback(() => {
     resetGameState(selectedMode);
@@ -1270,9 +1680,13 @@ export default function App() {
     setShields(activeCharacter.shieldBonus);
     setIsPlaying(true);
     isPlayingRef.current = true;
+    hasRunStartedRef.current = true;
     if (controlsTipTimeoutRef.current) clearTimeout(controlsTipTimeoutRef.current);
     setShowControlsTip(true);
     controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), CONTROLS_TIP_DURATION_MS);
+    if (activeDailyChallengeRef.current) {
+      setMessage(`${activeDailyChallengeRef.current.badge} Daily retry: ${activeDailyChallengeRef.current.objectiveText}`);
+    }
   }, [resetGameState, selectedMode, activeCharacter.shieldBonus, bestScores]);
 
   // ─── Surf: PanResponder ───────────────────────────────────────────────────
@@ -1299,7 +1713,12 @@ export default function App() {
       if (gs.vy < FLICK_TRICK_VELOCITY && !trickAirborne) {
         setTrickAirborne(true);
         setMessage('Aerial trick! 🤙');
-        setScore((c) => c + SURF.AERIAL_SCORE);
+        const aerialBonus = activeDailyChallengeRef.current?.mode === 'surf'
+          && activeDailyChallengeRef.current.modifierId === 'air-festival'
+          ? 40
+          : 0;
+        setScore((c) => c + SURF.AERIAL_SCORE + aerialBonus);
+        runSummaryRef.current = { ...runSummaryRef.current, aerials: (runSummaryRef.current.aerials ?? 0) + 1 };
         triggerAudioHook(AUDIO_HOOKS.surf.AERIAL, 260);
         if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         setTimeout(() => {
@@ -1318,8 +1737,12 @@ export default function App() {
       if (!isPlayingRef.current) return;
       if (skateAirborneRef.current) {
         // Trick tap while airborne — advance style meter to tricked(3)
-        setScore((c) => c + SKATE.TRICK_SCORE);
-        setMessage(`Trick confirmed! +${SKATE.TRICK_SCORE}`);
+        const trickScore = activeDailyChallengeRef.current?.mode === 'skate'
+          && activeDailyChallengeRef.current.modifierId === 'trick-frenzy'
+          ? SKATE.TRICK_SCORE + 50
+          : SKATE.TRICK_SCORE;
+        setScore((c) => c + trickScore);
+        setMessage(`Trick confirmed! +${trickScore}`);
         triggerAudioHook(AUDIO_HOOKS.skate.TRICK_CONFIRM, 220);
         setSkateTrick(null);
         if (stylePhaseRef.current === 2) {
@@ -1393,13 +1816,22 @@ export default function App() {
   const hackeyTap = useCallback((playerId: number) => {
     if (!isPlayingRef.current) return;
     if (playerId === hackeyTargetRef.current) {
-      const isPerfect = hackeyWindowRef.current > HACKEY.PERFECT_WINDOW;
-      const bonus = Math.floor(hackeyWindowRef.current * 50) + hackeyCombo * 5 + (isPerfect ? HACKEY.PERFECT_BONUS : 0);
+      const perfectWindow = activeDailyChallengeRef.current?.mode === 'hackey'
+        && activeDailyChallengeRef.current.modifierId === 'focus-ring'
+        ? HACKEY.PERFECT_WINDOW + 0.08
+        : HACKEY.PERFECT_WINDOW;
+      const isPerfect = hackeyWindowRef.current > perfectWindow;
+      const perfectBonus = activeDailyChallengeRef.current?.mode === 'hackey'
+        && activeDailyChallengeRef.current.modifierId === 'focus-ring'
+        ? HACKEY.PERFECT_BONUS + 4
+        : HACKEY.PERFECT_BONUS;
+      const bonus = Math.floor(hackeyWindowRef.current * 50) + hackeyCombo * 5 + (isPerfect ? perfectBonus : 0);
       setScore((c) => c + bonus);
       const nextCombo = hackeyCombo + 1;
       setHackeyCombo(nextCombo);
       runSummaryRef.current = { ...runSummaryRef.current, maxCombo: Math.max(runSummaryRef.current.maxCombo ?? 0, nextCombo) };
       if (isPerfect) {
+        runSummaryRef.current = { ...runSummaryRef.current, perfectTaps: (runSummaryRef.current.perfectTaps ?? 0) + 1 };
         setLastTapPerfect(true);
         setMessage(`⚡ PERFECT! +${bonus} (combo x${nextCombo})`);
         triggerAudioHook(AUDIO_HOOKS.hackey.TAP_PERFECT, 220);
@@ -1414,7 +1846,12 @@ export default function App() {
         setMessage(`🔥 Combo burst x${nextCombo}!`);
         triggerAudioHook(AUDIO_HOOKS.hackey.COMBO_BURST, 280);
       }
-      const nextTarget = Math.floor(Math.random() * HACKEY.TARGET_COUNT);
+      const shouldEcho = activeDailyChallengeRef.current?.mode === 'hackey'
+        && activeDailyChallengeRef.current.modifierId === 'echo-target'
+        && Math.random() < 0.35;
+      const nextTarget = shouldEcho
+        ? hackeyTargetRef.current
+        : Math.floor(Math.random() * HACKEY.TARGET_COUNT);
       hackeyTargetRef.current = nextTarget;
       hackeyWindowRef.current = 1;
       setHackeyTarget(nextTarget);
@@ -1576,6 +2013,24 @@ export default function App() {
     </View>
   );
 
+  const renderChallengeBanner = () => {
+    if (!activeDailyChallenge) return null;
+    const progress = getObjectiveProgress(activeDailyChallenge.objectiveId, score, runSummaryRef.current);
+    const isComplete = progress >= activeDailyChallenge.objectiveTarget;
+    return (
+      <View style={styles.challengeBanner}>
+        <Text style={styles.challengeBannerTitle}>
+          {activeDailyChallenge.badge} Daily • {activeDailyChallenge.modifierName}
+        </Text>
+        <Text style={styles.challengeBannerText}>{activeDailyChallenge.modifierText}</Text>
+        <Text style={styles.challengeBannerObjective}>
+          Objective: {activeDailyChallenge.objectiveText} ({Math.min(progress, activeDailyChallenge.objectiveTarget)}/{activeDailyChallenge.objectiveTarget})
+          {isComplete ? ' ✓' : ''}
+        </Text>
+      </View>
+    );
+  };
+
   const renderSurfGame = () => {
     const waveY = 55 + Math.sin(surfWavePhase.current) * 4;
     return (
@@ -1684,6 +2139,9 @@ export default function App() {
             <Text style={styles.controlsTipLine}>⬆ Flick UP quickly to launch an aerial (+{SURF.AERIAL_SCORE} pts)</Text>
             <Text style={styles.controlsTipLine}>⭐ Centre zone = 2× score — hold for BARREL bonus!</Text>
             <Text style={styles.controlsTipLine}>⚠ Dodge the whitewater closeout sections!</Text>
+            {activeDailyChallenge?.mode === 'surf' && (
+              <Text style={styles.controlsTipLine}>🌊 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+            )}
             <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
           </View>
         )}
@@ -1794,6 +2252,9 @@ export default function App() {
             <Text style={styles.controlsTipLine}>🚀 Build speed to launch off the coping</Text>
             <Text style={styles.controlsTipLine}>✈ When airborne → TAP the screen to score</Text>
             <Text style={styles.controlsTipLine}>🎨 Pump→Launch→Trick→Land = Style Bonus!</Text>
+            {activeDailyChallenge?.mode === 'skate' && (
+              <Text style={styles.controlsTipLine}>🛹 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+            )}
             <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
           </View>
         )}
@@ -1905,6 +2366,9 @@ export default function App() {
             <Text style={styles.controlsTipLine}>⚡ Tap in the green zone for PERFECT bonus!</Text>
             <Text style={styles.controlsTipLine}>⏱ Faster taps mean bigger combo chains and score bonuses</Text>
             <Text style={styles.controlsTipLine}>💀 Three misses ends the run, so keep the rhythm</Text>
+            {activeDailyChallenge?.mode === 'hackey' && (
+              <Text style={styles.controlsTipLine}>🤸 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+            )}
           </View>
         )}
 
@@ -1998,6 +2462,9 @@ export default function App() {
           <Text style={styles.controlsTipLine}>← → Drag to steer your body through the air</Text>
           <Text style={styles.controlsTipLine}>🎯 Thread through ring gates for +25 pts each</Text>
           <Text style={styles.controlsTipLine}>☁ Dodge white turbulence clouds!</Text>
+          {activeDailyChallenge?.mode === 'skydive' && (
+            <Text style={styles.controlsTipLine}>🪂 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+          )}
           <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
         </View>
       )}
@@ -2092,6 +2559,9 @@ export default function App() {
           <Text style={styles.controlsTipLine}>⚡ Drive over green boost pads for +{BOXRACE.BOOST_SCORE} pts</Text>
           <Text style={styles.controlsTipLine}>💨 Stay behind rivals to charge SLIPSTREAM!</Text>
           <Text style={styles.controlsTipLine}>💥 Dodge coloured rival boxes — shields absorb crashes!</Text>
+          {activeDailyChallenge?.mode === 'boxrace' && (
+            <Text style={styles.controlsTipLine}>📦 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+          )}
           <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
         </View>
       )}
@@ -2102,12 +2572,15 @@ export default function App() {
 
   const renderGameOver = () => {
     const isNewBest = score > runStartBestRef.current && score > 0;
+    const mastery = modeProgress[selectedMode];
+    const masteryLevel = getMasteryLevel(mastery.points);
+    const nextTier = getNextMasteryTier(mastery.points);
     return (
       <View style={styles.gameOverOverlay}>
         <Text style={styles.gameOverTitle}>Run Over</Text>
         <Text style={[styles.gameOverScore, isNewBest && { color: '#FFD700' }]}>{score}</Text>
         <Text style={styles.gameOverLabel}>{isNewBest ? '🏆 NEW BEST!' : 'score'}</Text>
-        <Text style={styles.gameOverBest}>Previous best: {bestScores[selectedMode]}</Text>
+        <Text style={styles.gameOverBest}>Best delta: {runEndMeta ? (runEndMeta.bestDelta >= 0 ? `+${runEndMeta.bestDelta}` : `${runEndMeta.bestDelta}`) : 0}</Text>
         {/* Stage reached */}
         <View style={[styles.gameOverSummaryRow, { marginTop: 10 }]}>
           <Text style={styles.gameOverSummaryLabel}>Stage reached</Text>
@@ -2146,12 +2619,48 @@ export default function App() {
             <Text style={styles.gameOverSummaryValue}>{runSummary.slipstreams}</Text>
           </View>
         )}
+        {runEndMeta && (
+          <>
+            <View style={styles.gameOverSummaryRow}>
+              <Text style={styles.gameOverSummaryLabel}>Run tokens</Text>
+              <Text style={styles.gameOverSummaryValue}>+{runEndMeta.payoutTokens}</Text>
+            </View>
+            <View style={styles.gameOverSummaryRow}>
+              <Text style={styles.gameOverSummaryLabel}>Mastery</Text>
+              <Text style={styles.gameOverSummaryValue}>
+                {MODE_MASTERIES[selectedMode][masteryLevel]} • +{runEndMeta.masteryPointsGained} pts
+              </Text>
+            </View>
+            {activeDailyChallenge && (
+              <View style={styles.gameOverChallengeWrap}>
+                <Text style={styles.gameOverChallengeTitle}>
+                  {activeDailyChallenge.badge} Daily • {activeDailyChallenge.modifierName}
+                </Text>
+                <Text style={styles.gameOverChallengeText}>
+                  {activeDailyChallenge.objectiveText} ({Math.min(runEndMeta.objectiveProgress, runEndMeta.objectiveTarget)}/{runEndMeta.objectiveTarget})
+                </Text>
+                <Text style={styles.gameOverChallengeText}>
+                  {runEndMeta.challengeCompleted
+                    ? runEndMeta.challengeTokens > 0
+                      ? `Cleared for +${runEndMeta.challengeTokens} bonus tokens`
+                      : 'Cleared again — reward already claimed today'
+                    : 'Replay CTA: run it back and finish the daily objective'}
+                </Text>
+              </View>
+            )}
+            <Text style={styles.gameOverReplayText}>
+              {nextTier
+                ? `Next mastery unlock at ${nextTier.points} pts: ${nextTier.rewardText}`
+                : 'All mastery tiers unlocked — chase a higher best and faster daily clears.'}
+            </Text>
+          </>
+        )}
         {message ? <Text style={styles.gameOverMsg}>{message}</Text> : null}
         <Pressable
           onPress={restartGame}
           style={[styles.gameOverBtn, { backgroundColor: activeMode.accentColor }]}
         >
-          <Text style={styles.gameOverBtnText}>Play Again</Text>
+          <Text style={styles.gameOverBtnText}>{activeDailyChallenge ? 'Replay This Challenge' : 'Play Again'}</Text>
         </Pressable>
         <Pressable onPress={() => setScreen('select')} style={styles.gameOverSecondary}>
           <Text style={styles.gameOverSecondaryText}>Change Sport</Text>
@@ -2372,14 +2881,17 @@ export default function App() {
 
             {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => {
               const mode = GAME_MODES[key];
+              const progress = modeProgress[key];
+              const level = getMasteryLevel(progress.points);
+              const nextTier = getNextMasteryTier(progress.points);
+              const daily = dailyChallenges[key];
+              const dailyCleared = progress.dailyCompletedDate === dayKey;
               return (
-                <Pressable
+                <View
                   key={key}
-                  onPress={() => startGame(key)}
-                  style={({ pressed }) => [
+                  style={[
                     styles.modeCard,
                     { borderColor: mode.accentColor, backgroundColor: mode.dimColor },
-                    pressed && styles.pressed,
                   ]}
                 >
                   <View style={[styles.modeCardBackdrop, { backgroundColor: mode.accentColor + '18' }]} />
@@ -2406,12 +2918,46 @@ export default function App() {
                   <View style={styles.modeCardScene}>
                     <View style={[styles.modeSceneOrb, { backgroundColor: mode.accentColor }]} />
                     <View style={[styles.modeSceneLine, { backgroundColor: mode.accentColor + '88' }]} />
-                    <Text style={styles.modeSceneCopy}>{activeCharacter.persona}</Text>
+                    <Text style={styles.modeSceneCopy}>{MODE_MASTERIES[key][level]}</Text>
+                    <Text style={styles.modeSceneSub}>
+                      Mastery {progress.points} pts
+                      {nextTier ? ` • Next at ${nextTier.points}` : ' • Max tier'}
+                    </Text>
                   </View>
-                  <View style={[styles.startPill, { backgroundColor: mode.accentColor }]}>
-                    <Text style={styles.startPillText}>TAP TO PLAY</Text>
+                  <View style={styles.dailyCard}>
+                    <Text style={[styles.dailyCardTitle, { color: mode.accentColor }]}>
+                      {daily.badge} Daily: {daily.modifierName}
+                    </Text>
+                    <Text style={styles.dailyCardText}>{daily.objectiveText}</Text>
+                    <Text style={styles.dailyCardSub}>
+                      {daily.modifierText} • Reward {daily.rewardTokens + (level >= 3 ? 10 : 0)} tokens
+                    </Text>
                   </View>
-                </Pressable>
+                  <View style={styles.modeActionRow}>
+                    <Pressable
+                      onPress={() => startGame(key)}
+                      style={({ pressed }) => [
+                        styles.startPill,
+                        styles.modeActionBtn,
+                        { backgroundColor: mode.accentColor },
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.startPillText}>Normal Run</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => startGame(key, true)}
+                      style={({ pressed }) => [
+                        styles.modeActionBtn,
+                        styles.dailyStartBtn,
+                        dailyCleared && styles.dailyStartBtnDone,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.dailyStartBtnText}>{dailyCleared ? 'Daily Cleared' : 'Play Daily'}</Text>
+                    </Pressable>
+                  </View>
+                </View>
               );
             })}
           </ScrollView>
@@ -2480,6 +3026,7 @@ export default function App() {
           {selectedMode === 'hackey' && renderHackeyGame()}
           {selectedMode === 'skydive' && renderSkydiveGame()}
           {selectedMode === 'boxrace' && renderBoxRaceGame()}
+          {isPlaying && renderChallengeBanner()}
 
           {/* Hit flash overlay */}
           {hitFlash && (
@@ -2656,8 +3203,35 @@ const styles = StyleSheet.create({
   modeSceneOrb: { width: 42, height: 42, borderRadius: 21, opacity: 0.8 },
   modeSceneLine: { height: 5, borderRadius: 999, width: '55%' },
   modeSceneCopy: { color: '#A9C5DD', fontSize: 12, fontWeight: '600' },
+  modeSceneSub: { color: '#6E97BB', fontSize: 11, fontWeight: '600' },
+  dailyCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1D3B57',
+    padding: 12,
+    backgroundColor: '#081523CC',
+    gap: 4,
+  },
+  dailyCardTitle: { fontWeight: '800', fontSize: 13 },
+  dailyCardText: { color: '#D3E8FA', fontSize: 13, fontWeight: '700' },
+  dailyCardSub: { color: '#6E97BB', fontSize: 11, lineHeight: 16 },
+  modeActionRow: { flexDirection: 'row', gap: 10 },
+  modeActionBtn: { flex: 1 },
   startPill: { borderRadius: 8, paddingVertical: 10, alignItems: 'center' },
   startPillText: { color: '#06111E', fontWeight: '800', fontSize: 13, letterSpacing: 1 },
+  dailyStartBtn: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#35506B',
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#0B1927',
+  },
+  dailyStartBtnDone: {
+    backgroundColor: '#12311D',
+    borderColor: '#2E7048',
+  },
+  dailyStartBtnText: { color: '#CFE8FF', fontWeight: '800', fontSize: 13, letterSpacing: 0.5 },
 
   // ── HUD ───────────────────────────────────────────────────────────────────
   gameHud: {
@@ -3064,6 +3638,19 @@ const styles = StyleSheet.create({
   gameOverSecondaryText: { color: '#7FB4D8', fontWeight: '700', fontSize: 15 },
   gameOverAdBtn: { paddingVertical: 10, alignItems: 'center' },
   gameOverAdText: { color: '#7ED8A0', fontWeight: '700', fontSize: 14 },
+  gameOverChallengeWrap: {
+    width: '86%',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#264766',
+    backgroundColor: '#0B1B2BCC',
+    padding: 12,
+    gap: 4,
+    marginTop: 8,
+  },
+  gameOverChallengeTitle: { color: '#E6F4FF', fontWeight: '800', fontSize: 13 },
+  gameOverChallengeText: { color: '#9AC2DF', fontSize: 12, lineHeight: 17 },
+  gameOverReplayText: { color: '#7FA8C7', fontSize: 12, textAlign: 'center', marginTop: 8, marginBottom: 4 },
 
   // ── In-game message ────────────────────────────────────────────────────────
   inGameMsg: { paddingVertical: 8, paddingHorizontal: 16, alignItems: 'center' },
@@ -3782,4 +4369,21 @@ const styles = StyleSheet.create({
   },
   gameOverSummaryLabel: { color: '#6E97BB', fontSize: 13, fontWeight: '600' },
   gameOverSummaryValue: { color: '#E6F4FF', fontSize: 13, fontWeight: '700' },
+  challengeBanner: {
+    position: 'absolute',
+    top: '10%',
+    left: '4%',
+    right: '4%',
+    borderRadius: 14,
+    backgroundColor: '#081523EE',
+    borderWidth: 1,
+    borderColor: '#2A4560',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    gap: 3,
+    zIndex: 45,
+  },
+  challengeBannerTitle: { color: '#E6F4FF', fontWeight: '800', fontSize: 13 },
+  challengeBannerText: { color: '#A9C5DD', fontSize: 12, lineHeight: 17 },
+  challengeBannerObjective: { color: '#FFD700', fontWeight: '700', fontSize: 12 },
 });
