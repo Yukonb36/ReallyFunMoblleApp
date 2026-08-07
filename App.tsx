@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
   Animated,
   Dimensions,
   Modal,
@@ -13,25 +14,25 @@ import {
   type ViewStyle,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as Haptics from 'expo-haptics';
 import {
   AdEventType,
   RewardedAd,
   RewardedAdEventType,
   TestIds,
 } from 'react-native-google-mobile-ads';
+import {
+  SURF, SKATE, HACKEY, SKYDIVE, BOXRACE, MILESTONES,
+  STAGE2_TICK, STAGE3_TICK,
+  TICK_MS, SLOW_MOTION_BASE_DURATION, DRAG_DEADZONE_PX, CONTROLS_TIP_DURATION_MS, FLICK_TRICK_VELOCITY,
+  SURF_DRAG_SENSITIVITY, SKY_DRAG_SENSITIVITY, BOX_DRAG_SENSITIVITY, SKATE_PUMP_SENSITIVITY,
+  SLOW_MOTION_SPEED_MULT, SLOW_MOTION_TICK_DIVISOR, FEEDBACK, AUDIO_HOOKS,
+} from './src/config/tuning';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const TICK_MS = 50; // ~20 fps game tick
-const SLOW_MOTION_BASE_DURATION = 18;
 const DEFAULT_LOG_DIR = `${FileSystem.documentDirectory ?? ''}alpha-logs/`;
 const DEFAULT_LOG_FILE = `${DEFAULT_LOG_DIR}alpha-errors.txt`;
 const { width: SCREEN_W } = Dimensions.get('window');
-const DRAG_DEADZONE_PX = 10;
-const SURF_DRAG_SENSITIVITY = 0.55;
-const SKY_DRAG_SENSITIVITY = 0.22;
-const BOX_DRAG_SENSITIVITY = 0.24;
-const SKATE_PUMP_SENSITIVITY = 0.18;
-const FLICK_TRICK_VELOCITY = -1.15;
 
 const rewardedAd = RewardedAd.createForAdRequest(TestIds.REWARDED, {
   requestNonPersonalizedAdsOnly: true,
@@ -64,6 +65,60 @@ type Character = {
   persona: string;
   signatureMove: string;
   bonusDescription: string;
+};
+
+type ModeProgress = {
+  points: number;
+  totalRuns: number;
+  challengeCompletions: number;
+  dailyCompletedDate: string | null;
+};
+
+type DailyObjectiveId =
+  | 'score'
+  | 'aerials'
+  | 'barrels'
+  | 'styles'
+  | 'lands'
+  | 'perfects'
+  | 'combo'
+  | 'gates'
+  | 'slipstreams'
+  | 'boosts';
+
+type DailyChallenge = {
+  dayKey: string;
+  mode: GameModeKey;
+  badge: string;
+  modifierId: string;
+  modifierName: string;
+  modifierText: string;
+  objectiveId: DailyObjectiveId;
+  objectiveText: string;
+  objectiveTarget: number;
+  rewardTokens: number;
+};
+
+type SaveState = {
+  bestScores: Record<GameModeKey, number>;
+  tokens: number;
+  lifetimeTokens: number;
+  ownedCharacters: string[];
+  selectedCharacterId: string;
+  modeProgress: Record<GameModeKey, ModeProgress>;
+};
+
+type RunEndMeta = {
+  payoutTokens: number;
+  challengeTokens: number;
+  masteryTokens: number;
+  masteryPointsGained: number;
+  bestDelta: number;
+  challengeCompleted: boolean;
+  objectiveProgress: number;
+  objectiveTarget: number;
+  levelBefore: number;
+  levelAfter: number;
 };
 
 // ── Surf game state ───
@@ -190,12 +245,177 @@ const CHARACTERS: Character[] = [
   },
 ];
 
+const SAVE_FILE = `${FileSystem.documentDirectory ?? ''}retro-rush-save.json`;
+const MODE_ORDER: GameModeKey[] = ['surf', 'skate', 'hackey', 'skydive', 'boxrace'];
+const MODE_MASTERIES = {
+  surf: ['Breakwater Rookie', 'Point Break Local', 'Tube Poster', 'Sponsor Wave', 'Festival Legend'],
+  skate: ['Ramp Rookie', 'Park Local', 'Deck Poster', 'Sponsor Session', 'Festival Legend'],
+  hackey: ['Circle Rookie', 'Jam Local', 'Glow Poster', 'Sponsor Rhythm', 'Festival Legend'],
+  skydive: ['Drop Rookie', 'Wind Local', 'Cloud Poster', 'Sponsor Altitude', 'Festival Legend'],
+  boxrace: ['Track Rookie', 'Grid Local', 'Pit Poster', 'Sponsor Turbo', 'Festival Legend'],
+} as const satisfies Record<GameModeKey, readonly string[]>;
+const MASTERY_LEVELS = [
+  { points: 0, tokenReward: 0, rewardText: 'Starter stamp' },
+  { points: 1, tokenReward: 15, rewardText: 'Sponsor drop: +15 tokens' },
+  { points: 3, tokenReward: 20, rewardText: 'Mode poster cosmetic unlocked' },
+  { points: 6, tokenReward: 25, rewardText: 'Daily reward boost unlocked' },
+  { points: 10, tokenReward: 35, rewardText: 'Legend aura cosmetic unlocked' },
+] as const;
+const DAILY_MODIFIERS = {
+  surf: [
+    { id: 'drift-current', name: 'Cross Current', text: 'A side current slowly pushes your line across the wave.' },
+    { id: 'squall-lines', name: 'Squall Lines', text: 'Whitewater sections arrive faster and roll wider.' },
+    { id: 'air-festival', name: 'Air Festival', text: 'Aerials cash out bigger, but the wave stays twitchy.' },
+  ],
+  skate: [
+    { id: 'low-gravity', name: 'Low Gravity', text: 'Hang time lasts longer, creating slower airborne reads.' },
+    { id: 'rail-jam', name: 'Rail Jam', text: 'Rails show up constantly to change line choices.' },
+    { id: 'trick-frenzy', name: 'Trick Frenzy', text: 'Called tricks pay extra, rewarding aggressive launches.' },
+  ],
+  hackey: [
+    { id: 'hot-potato', name: 'Hot Potato', text: 'The sack drains faster, forcing quick decisions.' },
+    { id: 'echo-target', name: 'Echo Target', text: 'Correct taps can repeat the same player for rhythm loops.' },
+    { id: 'focus-ring', name: 'Focus Ring', text: 'Perfect taps are worth more, but the perfect lane is tighter.' },
+  ],
+  skydive: [
+    { id: 'jetstream', name: 'Jetstream', text: 'A wind lane drifts your diver off-centre over time.' },
+    { id: 'ring-rush', name: 'Ring Rush', text: 'Gate spawns speed up and rewards spike for clean lines.' },
+    { id: 'cloudburst', name: 'Cloudburst', text: 'Turbulence clusters are denser and more frequent.' },
+  ],
+  boxrace: [
+    { id: 'sidewind', name: 'Sidewind', text: 'The kart gets nudged sideways unless you keep correcting.' },
+    { id: 'boost-parade', name: 'Boost Parade', text: 'Pads appear faster to create risk-reward racing lines.' },
+    { id: 'turbo-grid', name: 'Turbo Grid', text: 'Rivals charge harder and the grid gets busier sooner.' },
+  ],
+} as const satisfies Record<GameModeKey, readonly { id: string; name: string; text: string }[]>;
+const DAILY_OBJECTIVES = {
+  surf: [
+    { id: 'aerials', text: 'Land 3 aerials', target: 3 },
+    { id: 'barrels', text: 'Trigger 2 barrels', target: 2 },
+    { id: 'score', text: 'Score 450+', target: 450 },
+  ],
+  skate: [
+    { id: 'styles', text: 'Land 2 style bonuses', target: 2 },
+    { id: 'lands', text: 'Stick 4 landings', target: 4 },
+    { id: 'score', text: 'Score 500+', target: 500 },
+  ],
+  hackey: [
+    { id: 'perfects', text: 'Hit 5 perfect taps', target: 5 },
+    { id: 'combo', text: 'Reach combo x12', target: 12 },
+    { id: 'score', text: 'Score 350+', target: 350 },
+  ],
+  skydive: [
+    { id: 'gates', text: 'Clear 8 gates', target: 8 },
+    { id: 'perfects', text: 'Thread 3 perfect gates', target: 3 },
+    { id: 'score', text: 'Score 450+', target: 450 },
+  ],
+  boxrace: [
+    { id: 'slipstreams', text: 'Trigger 3 slipstreams', target: 3 },
+    { id: 'boosts', text: 'Collect 4 boosts', target: 4 },
+    { id: 'score', text: 'Score 500+', target: 500 },
+  ],
+} as const satisfies Record<GameModeKey, readonly { id: DailyObjectiveId; text: string; target: number }[]>;
+const DAILY_BADGES: Record<GameModeKey, string> = {
+  surf: '🌊',
+  skate: '🛹',
+  hackey: '🤸',
+  skydive: '🪂',
+  boxrace: '📦',
+};
+const createDefaultModeProgress = (): Record<GameModeKey, ModeProgress> => ({
+  surf: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+  skate: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+  hackey: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+  skydive: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+  boxrace: { points: 0, totalRuns: 0, challengeCompletions: 0, dailyCompletedDate: null },
+});
+const getMasteryLevel = (points: number) => {
+  let level = 0;
+  for (let i = 0; i < MASTERY_LEVELS.length; i += 1) {
+    if (points >= MASTERY_LEVELS[i].points) level = i;
+  }
+  return level;
+};
+const getNextMasteryTier = (points: number) =>
+  MASTERY_LEVELS.find((tier) => tier.points > points) ?? null;
+const sumLevelRewards = (fromLevel: number, toLevel: number) => {
+  let total = 0;
+  for (let level = fromLevel + 1; level <= toLevel; level += 1) {
+    total += MASTERY_LEVELS[level]?.tokenReward ?? 0;
+  }
+  return total;
+};
+const getDailySeed = (dayKey: string) =>
+  Array.from(dayKey).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+const hashSeed = (value: string) =>
+  Array.from(value).reduce((sum, char, index) => sum + char.charCodeAt(0) * (index + 17), 0);
+const buildDailyChallenge = (mode: GameModeKey, dayKey: string): DailyChallenge => {
+  const modeIndex = MODE_ORDER.indexOf(mode);
+  const modifierSeed = hashSeed(`${dayKey}:${mode}:modifier`) + getDailySeed(dayKey) + modeIndex * 5;
+  const objectiveSeed = hashSeed(`${dayKey}:${mode}:objective`) + modeIndex * 11;
+  const modifier = DAILY_MODIFIERS[mode][modifierSeed % DAILY_MODIFIERS[mode].length];
+  const objective = DAILY_OBJECTIVES[mode][objectiveSeed % DAILY_OBJECTIVES[mode].length];
+  return {
+    dayKey,
+    mode,
+    badge: DAILY_BADGES[mode],
+    modifierId: modifier.id,
+    modifierName: modifier.name,
+    modifierText: modifier.text,
+    objectiveId: objective.id,
+    objectiveText: objective.text,
+    objectiveTarget: objective.target,
+    rewardTokens: 28 + modeIndex * 6,
+  };
+};
+
 // ─── Helper ───────────────────────────────────────────────────────────────────
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const applyGestureDeadzone = (distance: number) =>
   Math.abs(distance) <= DRAG_DEADZONE_PX
     ? 0
     : distance - Math.sign(distance) * DRAG_DEADZONE_PX;
+const getObjectiveProgress = (
+  objectiveId: DailyObjectiveId,
+  scoreValue: number,
+  stats: {
+    aerials?: number;
+    barrelRides?: number;
+    styleBonuses?: number;
+    cleanLandings?: number;
+    perfectTaps?: number;
+    maxCombo?: number;
+    gatesCleared?: number;
+    perfectThreads?: number;
+    slipstreams?: number;
+    boostsCollected?: number;
+  },
+) => {
+  switch (objectiveId) {
+    case 'score':
+      return scoreValue;
+    case 'aerials':
+      return stats.aerials ?? 0;
+    case 'barrels':
+      return stats.barrelRides ?? 0;
+    case 'styles':
+      return stats.styleBonuses ?? 0;
+    case 'lands':
+      return stats.cleanLandings ?? 0;
+    case 'perfects':
+      return (stats.perfectTaps ?? 0) + (stats.perfectThreads ?? 0);
+    case 'combo':
+      return stats.maxCombo ?? 0;
+    case 'gates':
+      return stats.gatesCleared ?? 0;
+    case 'slipstreams':
+      return stats.slipstreams ?? 0;
+    case 'boosts':
+      return stats.boostsCollected ?? 0;
+    default:
+      return 0;
+  }
+};
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -209,6 +429,22 @@ export default function App() {
     surf: 0, skate: 0, hackey: 0, skydive: 0, boxrace: 0,
   });
   const [isPlaying, setIsPlaying] = useState(false);
+  const [modeProgress, setModeProgress] = useState<Record<GameModeKey, ModeProgress>>(createDefaultModeProgress());
+  const [saveReady, setSaveReady] = useState(false);
+  const dayKey = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const dailyChallenges = useMemo<Record<GameModeKey, DailyChallenge>>(
+    () => ({
+      surf: buildDailyChallenge('surf', dayKey),
+      skate: buildDailyChallenge('skate', dayKey),
+      hackey: buildDailyChallenge('hackey', dayKey),
+      skydive: buildDailyChallenge('skydive', dayKey),
+      boxrace: buildDailyChallenge('boxrace', dayKey),
+    }),
+    [dayKey],
+  );
+  const [activeDailyChallenge, setActiveDailyChallenge] = useState<DailyChallenge | null>(null);
+  const activeDailyChallengeRef = useRef<DailyChallenge | null>(null);
+  const [runEndMeta, setRunEndMeta] = useState<RunEndMeta | null>(null);
 
   // ── economy ───────────────────────────────────────────────────────────────
   const [tokens, setTokens] = useState(0);
@@ -230,14 +466,19 @@ export default function App() {
   // ── refs ──────────────────────────────────────────────────────────────────
   const tickRef = useRef(0);
   const rewardedAtGameOverRef = useRef(false);
+  const runStartBestRef = useRef(0);
   const isPlayingRef = useRef(false);
+  const hasRunStartedRef = useRef(false);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Surf state ────────────────────────────────────────────────────────────
   const [surferX, setSurferX] = useState(0.5);          // 0-1 across wave face
   const [waveZones, setWaveZones] = useState<WaveZone[]>([]); // danger whitewater
   const [trickAirborne, setTrickAirborne] = useState(false);
   const [tubeMultiplier, setTubeMultiplier] = useState(1);
+  const trickAirborneRef = useRef(false);
   const surferXRef = useRef(0.5);
+  const tubeMultiplierRef = useRef(1);
   const surfDragOriginRef = useRef(0.5);
   const surfWavePhase = useRef(0); // for sinusoidal wave anim
   const surfAnimVal = useRef(new Animated.Value(0)).current;
@@ -255,9 +496,9 @@ export default function App() {
 
   // ── Hackey state ──────────────────────────────────────────────────────────
   const HACKEY_PLAYERS = useMemo<HackeyPlayer[]>(() =>
-    Array.from({ length: 6 }, (_, i) => ({
+    Array.from({ length: HACKEY.TARGET_COUNT }, (_, i) => ({
       id: i,
-      angle: (i * Math.PI * 2) / 6,
+      angle: (i * Math.PI * 2) / HACKEY.TARGET_COUNT,
     })), []);
   const [hackeyTarget, setHackeyTarget] = useState(0);   // player id
   const [hackeyWindow, setHackeyWindow] = useState(1);   // 0-1 shrinking
@@ -285,8 +526,61 @@ export default function App() {
   const racerXRef = useRef(0.5);
   const raceDragOriginRef = useRef(0.5);
 
+  // ── Mastery mechanics ─────────────────────────────────────────────────────
+  // Surf: Barrel Ride
+  const [barrelHoldTicks, setBarrelHoldTicks] = useState(0);
+  const [barrelActive, setBarrelActive] = useState(false);
+  const barrelActiveRef = useRef(false);
+  const barrelHoldTicksRef = useRef(0);
+  const barrelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Skate: Style Meter (pump → aerial → trick → land sequence)
+  const [stylePhase, setStylePhase] = useState<0 | 1 | 2 | 3>(0); // 0=idle,1=pumped,2=airborne,3=tricked
+  const [styleTicks, setStyleTicks] = useState(0);
+  const stylePhaseRef = useRef<0 | 1 | 2 | 3>(0);
+  const styleTicksRef = useRef(0);
+  // Hackey: perfect-timing bonus
+  const [lastTapPerfect, setLastTapPerfect] = useState(false);
+  // Skydive: perfect threading bonus
+  const [lastGatePerfect, setLastGatePerfect] = useState(false);
+  // Box Race: slipstream counter
+  const [slipstreamTicks, setSlipstreamTicks] = useState(0);
+  const [slipstreamActive, setSlipstreamActive] = useState(false);
+  const slipstreamTicksRef = useRef(0);
+  const slipstreamActiveRef = useRef(false);
+
+  // ── Feedback & progression ────────────────────────────────────────────────
+  const [hitFlash, setHitFlash] = useState(false);          // brief red flash on hit
+  const [milestoneMsg, setMilestoneMsg] = useState('');     // milestone toast
+  const milestoneReachedRef = useRef<Set<number>>(new Set());
+  const audioCueCooldownUntilRef = useRef<Record<string, number>>({});
+  const recentSurfNearMissRef = useRef(0);
+  const recentHackeyDangerRef = useRef(0);
+  const recentSkydiveDangerRef = useRef(0);
+  const recentBoxDangerRef = useRef(0);
+  const surfHitCooldownRef = useRef(0);
+  const skateAirCooldownRef = useRef(0);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  // Run summary (for game-over screen)
+  const [runSummary, setRunSummary] = useState<{
+    maxCombo?: number; gatesCleared?: number; barrelRides?: number;
+    styleBonuses?: number; maxSpeed?: number; slipstreams?: number;
+    aerials?: number; cleanLandings?: number; perfectTaps?: number;
+    perfectThreads?: number; boostsCollected?: number;
+  }>({});
+  const runSummaryRef = useRef<typeof runSummary>({});
+
+  // ── Difficulty stage ──────────────────────────────────────────────────────
+  const [diffStage, setDiffStage] = useState<1 | 2 | 3>(1);
+  const diffStageRef = useRef<1 | 2 | 3>(1);
+
   const activeMode = GAME_MODES[selectedMode];
   const activeCharacter = CHARACTERS.find((c) => c.id === selectedCharacterId) ?? CHARACTERS[0];
+
+  const triggerAudioHook = useCallback((hookId: string, cooldownMs = 120) => {
+    const now = Date.now();
+    if ((audioCueCooldownUntilRef.current[hookId] ?? 0) > now) return;
+    audioCueCooldownUntilRef.current[hookId] = now + cooldownMs;
+  }, []);
 
   // ─── Error logging ────────────────────────────────────────────────────────
   const appendErrorLog = useCallback(async (error: unknown, context: string) => {
@@ -308,6 +602,72 @@ export default function App() {
   }, [logFilePath]);
 
   useEffect(() => {
+    let mounted = true;
+    const loadSave = async () => {
+      try {
+        const info = await FileSystem.getInfoAsync(SAVE_FILE);
+        if (!info.exists) {
+          if (mounted) setSaveReady(true);
+          return;
+        }
+        const raw = await FileSystem.readAsStringAsync(SAVE_FILE);
+        const parsed = JSON.parse(raw) as Partial<SaveState>;
+        if (!mounted) return;
+        if (parsed.bestScores) {
+          setBestScores((current) => ({ ...current, ...parsed.bestScores }));
+        }
+        if (typeof parsed.tokens === 'number') setTokens(parsed.tokens);
+        if (typeof parsed.lifetimeTokens === 'number') setLifetimeTokens(parsed.lifetimeTokens);
+        if (Array.isArray(parsed.ownedCharacters) && parsed.ownedCharacters.length > 0) {
+          setOwnedCharacters(parsed.ownedCharacters);
+        }
+        if (typeof parsed.selectedCharacterId === 'string') {
+          setSelectedCharacterId(parsed.selectedCharacterId);
+        }
+        if (parsed.modeProgress) {
+          setModeProgress({
+            ...createDefaultModeProgress(),
+            ...parsed.modeProgress,
+          });
+        }
+      } catch (error) {
+        void appendErrorLog(error, 'LoadSaveState');
+      } finally {
+        if (mounted) setSaveReady(true);
+      }
+    };
+    void loadSave();
+    return () => {
+      mounted = false;
+    };
+  }, [appendErrorLog]);
+
+  useEffect(() => {
+    if (!saveReady) return;
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(() => {
+      void (async () => {
+        try {
+          const payload: SaveState = {
+            bestScores,
+            tokens,
+            lifetimeTokens,
+            ownedCharacters,
+            selectedCharacterId,
+            modeProgress,
+          };
+          await FileSystem.writeAsStringAsync(SAVE_FILE, JSON.stringify(payload));
+        } catch (error) {
+          void appendErrorLog(error, 'PersistSaveState');
+        }
+      })();
+    }, 150);
+    return () => {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    };
+  }, [appendErrorLog, bestScores, lifetimeTokens, modeProgress, ownedCharacters, saveReady, selectedCharacterId, tokens]);
+
+  useEffect(() => {
     const errorUtils = (
       globalThis as {
         ErrorUtils?: {
@@ -325,6 +685,13 @@ export default function App() {
       if (previousHandler) errorUtils?.setGlobalHandler?.(previousHandler);
     };
   }, [appendErrorLog]);
+
+  // ─── Reduced motion detection ──────────────────────────────────────────────
+  useEffect(() => {
+    void AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion);
+    const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion);
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     if (!isPlaying) setShields(activeCharacter.shieldBonus);
@@ -354,13 +721,63 @@ export default function App() {
 
   // ─── Payout on game over ──────────────────────────────────────────────────
   useEffect(() => {
-    if (isPlaying || rewardedAtGameOverRef.current) return;
+    if (isPlaying || rewardedAtGameOverRef.current || !hasRunStartedRef.current) return;
     rewardedAtGameOverRef.current = true;
-    const runPayout = Math.max(5, Math.floor(score / 8) * activeMode.tokenMultiplier);
-    setTokens((c) => c + runPayout);
-    setLifetimeTokens((c) => c + runPayout);
-    setMessage(`Run complete! +${runPayout} tokens from ${activeMode.name}.`);
-  }, [activeMode.name, activeMode.tokenMultiplier, isPlaying, score]);
+    const challenge = activeDailyChallengeRef.current;
+    const currentProgress = modeProgress[selectedMode];
+    const previousLevel = getMasteryLevel(currentProgress.points);
+    const runPayout = Math.max(8, Math.floor(score / 8) * activeMode.tokenMultiplier);
+    const bestDelta = score - runStartBestRef.current;
+    const objectiveProgress = challenge
+      ? getObjectiveProgress(challenge.objectiveId, score, runSummaryRef.current)
+      : 0;
+    const challengeCompleted = Boolean(challenge && objectiveProgress >= challenge.objectiveTarget);
+    const sponsorBonus = previousLevel >= 3 ? 10 : 0;
+    const challengeTokens = challengeCompleted && currentProgress.dailyCompletedDate !== challenge?.dayKey
+      ? (challenge?.rewardTokens ?? 0) + sponsorBonus
+      : 0;
+    const masteryPointsGained =
+      1
+      + (score >= MILESTONES[selectedMode][0] ? 1 : 0)
+      + (bestDelta > 0 ? 1 : 0)
+      + (challengeCompleted ? 2 : 0);
+    const nextPoints = currentProgress.points + masteryPointsGained;
+    const nextLevel = getMasteryLevel(nextPoints);
+    const masteryTokens = sumLevelRewards(previousLevel, nextLevel);
+
+    setTokens((c) => c + runPayout + challengeTokens + masteryTokens);
+    setLifetimeTokens((c) => c + runPayout + challengeTokens + masteryTokens);
+    setModeProgress((current) => ({
+      ...current,
+      [selectedMode]: {
+        ...current[selectedMode],
+        points: nextPoints,
+        totalRuns: current[selectedMode].totalRuns + 1,
+        challengeCompletions: current[selectedMode].challengeCompletions + (challengeTokens > 0 ? 1 : 0),
+        dailyCompletedDate: challengeTokens > 0 ? challenge?.dayKey ?? current[selectedMode].dailyCompletedDate : current[selectedMode].dailyCompletedDate,
+      },
+    }));
+    setRunEndMeta({
+      payoutTokens: runPayout,
+      challengeTokens,
+      masteryTokens,
+      masteryPointsGained,
+      bestDelta,
+      challengeCompleted,
+      objectiveProgress,
+      objectiveTarget: challenge?.objectiveTarget ?? 0,
+      levelBefore: previousLevel,
+      levelAfter: nextLevel,
+    });
+    if (challengeCompleted && challengeTokens > 0) {
+      setMessage(`Daily clear! +${runPayout + challengeTokens + masteryTokens} tokens banked.`);
+    } else if (challengeCompleted) {
+      setMessage(`Daily objective cleared again. +${runPayout + masteryTokens} tokens banked.`);
+    } else {
+      setMessage(`Run complete! +${runPayout + masteryTokens} tokens from ${activeMode.name}.`);
+    }
+    hasRunStartedRef.current = false;
+  }, [activeMode.name, activeMode.tokenMultiplier, isPlaying, modeProgress, score, selectedMode]);
 
   // ─── Sync refs ────────────────────────────────────────────────────────────
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
@@ -373,35 +790,113 @@ export default function App() {
   useEffect(() => { skyXRef.current = skyX; }, [skyX]);
   useEffect(() => { racerXRef.current = racerX; }, [racerX]);
   useEffect(() => { sensitivityRef.current = sensitivity; }, [sensitivity]);
+  useEffect(() => { stylePhaseRef.current = stylePhase; }, [stylePhase]);
+  useEffect(() => { styleTicksRef.current = styleTicks; }, [styleTicks]);
+  useEffect(() => { tubeMultiplierRef.current = tubeMultiplier; }, [tubeMultiplier]);
+  useEffect(() => { trickAirborneRef.current = trickAirborne; }, [trickAirborne]);
+  useEffect(() => { slipstreamTicksRef.current = slipstreamTicks; }, [slipstreamTicks]);
+  useEffect(() => { slipstreamActiveRef.current = slipstreamActive; }, [slipstreamActive]);
+  useEffect(() => { barrelActiveRef.current = barrelActive; }, [barrelActive]);
+  useEffect(() => { barrelHoldTicksRef.current = barrelHoldTicks; }, [barrelHoldTicks]);
+  useEffect(() => { diffStageRef.current = diffStage; }, [diffStage]);
+  useEffect(() => { activeDailyChallengeRef.current = activeDailyChallenge; }, [activeDailyChallenge]);
   // ══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'surf') return;
 
+    const checkMilestones = (currentScore: number) => {
+      const milestones = MILESTONES.surf;
+      for (const m of milestones) {
+        if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
+          milestoneReachedRef.current.add(m);
+          setMilestoneMsg(`🏄 Milestone: ${m} pts!`);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
+          triggerAudioHook(AUDIO_HOOKS.surf.STAGE_UP, 320);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      }
+    };
+
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
+      const surfModifier = activeDailyChallengeRef.current?.mode === 'surf'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
 
+      // Difficulty stage
+      const stage = tickRef.current >= STAGE3_TICK ? 3 : tickRef.current >= STAGE2_TICK ? 2 : 1;
+      if (stage !== diffStageRef.current) {
+        diffStageRef.current = stage;
+        setDiffStage(stage as 1 | 2 | 3);
+        setMessage(stage === 2 ? '🌊 Wave picking up speed!' : '🌊🌊 Storm conditions!');
+        triggerAudioHook(AUDIO_HOOKS.surf.STAGE_UP, 500);
+        setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
+      }
+
+      const barrelBonus = barrelActiveRef.current ? SURF.BARREL_MULTIPLIER : tubeMultiplierRef.current;
       // Score tick
-      setScore((c) => c + tubeMultiplier);
+      setScore((c) => {
+        const next = c + barrelBonus;
+        checkMilestones(next);
+        return next;
+      });
 
       // Slow motion countdown (every ~8 ticks ≈ 400ms)
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
-      const speed = slowMotionSeconds > 0 ? 0.006 : 0.012;
+      let stageSpeed = stage === 3 ? SURF.WAVE_SPEED_S3 : stage === 2 ? SURF.WAVE_SPEED_S2 : SURF.WAVE_SPEED_S1;
+      if (surfModifier === 'squall-lines') stageSpeed += 0.002;
+      const speed = slowMotionSeconds > 0 ? stageSpeed * SLOW_MOTION_SPEED_MULT : stageSpeed;
+
+      // Barrel mechanic: holding sweet zone
+      const inSweet = surferXRef.current > SURF.SWEET_ZONE_LO && surferXRef.current < SURF.SWEET_ZONE_HI;
+      if (inSweet && !trickAirborneRef.current && !barrelActiveRef.current) {
+        const newHold = barrelHoldTicksRef.current + 1;
+        barrelHoldTicksRef.current = newHold;
+        setBarrelHoldTicks(newHold);
+        if (newHold >= SURF.BARREL_HOLD_TICKS) {
+          barrelActiveRef.current = true;
+          setBarrelActive(true);
+          runSummaryRef.current = { ...runSummaryRef.current, barrelRides: (runSummaryRef.current.barrelRides ?? 0) + 1 };
+          setMessage('🛢 BARREL! 3× score for 3 seconds!');
+          triggerAudioHook(AUDIO_HOOKS.surf.BARREL, 350);
+          if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+          if (barrelTimerRef.current) clearTimeout(barrelTimerRef.current);
+          barrelTimerRef.current = setTimeout(() => {
+            barrelActiveRef.current = false;
+            setBarrelActive(false);
+            barrelHoldTicksRef.current = 0;
+            setBarrelHoldTicks(0);
+            setMessage('');
+          }, SURF.BARREL_DURATION_TICKS * TICK_MS);
+        }
+      } else if (!inSweet && !barrelActiveRef.current) {
+        barrelHoldTicksRef.current = 0;
+        setBarrelHoldTicks(0);
+      }
+
+      // Stage-based spawn interval
+      let spawnInterval = stage === 3 ? SURF.ZONE_SPAWN_S3 : stage === 2 ? SURF.ZONE_SPAWN_S2 : SURF.ZONE_SPAWN_S1;
+      let { min: wMin, max: wMax } = stage === 3 ? SURF.ZONE_WIDTH_S3 : stage === 2 ? SURF.ZONE_WIDTH_S2 : SURF.ZONE_WIDTH_S1;
+      if (surfModifier === 'squall-lines') {
+        spawnInterval = Math.max(18, spawnInterval - 8);
+        wMin += 0.02;
+        wMax += 0.025;
+      }
 
       // Move / spawn whitewater zones
       setWaveZones((current) => {
         const moved = current
           .map((z) => ({ ...z, x: z.x - speed }))
           .filter((z) => z.x + z.width > 0);
-        // Spawn new zone roughly every 3-4 seconds
-        if (tickRef.current % (slowMotionSeconds > 0 ? 120 : 60) === 0) {
+        if (tickRef.current % (slowMotionSeconds > 0 ? Math.floor(spawnInterval / SLOW_MOTION_SPEED_MULT) : spawnInterval) === 0) {
           moved.push({
             id: Date.now() + Math.random(),
             x: 1.0,
-            width: 0.12 + Math.random() * 0.14,
+            width: wMin + Math.random() * (wMax - wMin),
           });
         }
         return moved;
@@ -409,35 +904,63 @@ export default function App() {
 
       // Wave animation phase
       surfWavePhase.current += 0.04;
+      if (surfModifier === 'drift-current') {
+        const drift = Math.sin(tickRef.current / 18) * 0.0055;
+        const nextX = clamp(surferXRef.current + drift, 0.05, 0.95);
+        surferXRef.current = nextX;
+        setSurferX(nextX);
+      }
 
       // Check collision: surfer at surferXRef.current hits a zone?
       setWaveZones((zones) => {
-        const hit = zones.find((z) => {
-          const sx = surferXRef.current;
-          return sx > z.x && sx < z.x + z.width;
-        });
-        if (hit && !trickAirborne) {
+        const sx = surferXRef.current;
+        const hit = zones.find((z) => sx > z.x && sx < z.x + z.width);
+        // Near-miss feedback
+        const nearMiss = !hit && zones.find((z) => (
+          Math.abs(sx - z.x) < SURF.NEAR_MISS_THRESHOLD || Math.abs(sx - (z.x + z.width)) < SURF.NEAR_MISS_THRESHOLD
+        ));
+        if (nearMiss && Date.now() - recentSurfNearMissRef.current > 350) {
+          recentSurfNearMissRef.current = Date.now();
+          setMessage('⚠️ Close call!');
+          triggerAudioHook(AUDIO_HOOKS.surf.NEAR_MISS, 260);
+          if (!reducedMotion) void Haptics.selectionAsync();
+        }
+        if (hit && !trickAirborneRef.current) {
+          if (tickRef.current < surfHitCooldownRef.current) return zones;
+          surfHitCooldownRef.current = tickRef.current + SURF.HIT_COOLDOWN_TICKS;
           if (shields > 0) {
             setShields((c) => c - 1);
             setMessage('Whitewater! Shield absorbed it!');
+            setHitFlash(true);
+            triggerAudioHook(AUDIO_HOOKS.surf.HIT, 260);
+            setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
+            if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             return zones.filter((z) => z.id !== hit.id);
           }
           // Wipeout
           isPlayingRef.current = false;
           setIsPlaying(false);
+          setHitFlash(true);
+          triggerAudioHook(AUDIO_HOOKS.surf.HIT, 260);
+          setTimeout(() => setHitFlash(false), FEEDBACK.FATAL_FLASH_MS);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+          setRunSummary({ ...runSummaryRef.current });
           setBestScores((c) => ({ ...c, surf: Math.max(c.surf, score) }));
         }
         return zones;
       });
 
-      // Sweet zone: surfer within 0.35-0.65
-      const inSweet = surferXRef.current > 0.35 && surferXRef.current < 0.65;
-      setTubeMultiplier(inSweet ? 2 : 1);
+      // Sweet zone multiplier (barrel overrides)
+      if (!barrelActiveRef.current) {
+        const nextMultiplier = inSweet ? SURF.TUBE_MULTIPLIER_BONUS : 1;
+        tubeMultiplierRef.current = nextMultiplier;
+        setTubeMultiplier(nextMultiplier);
+      }
     }, TICK_MS);
 
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, selectedMode, slowMotionSeconds, shields, trickAirborne, score]);
+  }, [isPlaying, selectedMode, slowMotionSeconds, shields, trickAirborne, score, reducedMotion]);
 
   // ══════════════════════════════════════════════════════════════════════════
   //  SKATE GAME LOOP
@@ -445,18 +968,61 @@ export default function App() {
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'skate') return;
 
-    const GRAVITY = 0.008; // radians/tick² pulling toward 0
-    const FRICTION = 0.995;
-    const PIPE_RADIUS = Math.PI * 0.45; // max angle before launch
-    const TRICK_NAMES = ['Grab', '180°', '360°', 'McTwist'];
+    const challengeModifier = activeDailyChallengeRef.current?.mode === 'skate'
+      ? activeDailyChallengeRef.current.modifierId
+      : null;
+    const GRAVITY = challengeModifier === 'low-gravity' ? SKATE.GRAVITY * 0.8 : SKATE.GRAVITY;
+    const FRICTION = SKATE.FRICTION;
+    const PIPE_RADIUS = SKATE.PIPE_RADIUS;
+
+    const checkMilestones = (currentScore: number) => {
+      for (const m of MILESTONES.skate) {
+        if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
+          milestoneReachedRef.current.add(m);
+          setMilestoneMsg(`🛹 Milestone: ${m} pts!`);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      }
+    };
 
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
-      setScore((c) => c + 1);
 
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      // Difficulty stage
+      const stage = tickRef.current >= STAGE3_TICK ? 3 : tickRef.current >= STAGE2_TICK ? 2 : 1;
+      if (stage !== diffStageRef.current) {
+        diffStageRef.current = stage;
+        setDiffStage(stage as 1 | 2 | 3);
+        setMessage(stage === 2 ? '🛹 Crowd going wild!' : '🛹 EXPERT MODE!');
+        triggerAudioHook(AUDIO_HOOKS.skate.STAGE_UP, 500);
+        setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
+      }
+
+      const trickPool = stage === 3 ? SKATE.TRICK_NAMES_S3 : stage === 2 ? SKATE.TRICK_NAMES_S2 : SKATE.TRICK_NAMES_S1;
+
+      setScore((c) => {
+        const next = c + 1;
+        checkMilestones(next);
+        return next;
+      });
+
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
+      }
+
+      // Style Meter: phase progresses pump→airborne→tricked→land
+      if (stylePhaseRef.current > 0) {
+        styleTicksRef.current += 1;
+        setStyleTicks((s) => s + 1);
+        if (styleTicksRef.current > SKATE.STYLE_WINDOW_TICKS) {
+          // Timed out — reset style meter
+          stylePhaseRef.current = 0;
+          setStylePhase(0);
+          styleTicksRef.current = 0;
+          setStyleTicks(0);
+        }
       }
 
       const curAngle = skateAngleRef.current;
@@ -464,25 +1030,45 @@ export default function App() {
       const airborne = skateAirborneRef.current;
 
       if (airborne) {
-        // Simple ballistic arc: gravity pulls angle back toward 0
-        const newSpeed = curSpeed - GRAVITY * Math.sign(curAngle) * (slowMotionSeconds > 0 ? 0.5 : 1);
-        const newAngle = curAngle + newSpeed * (slowMotionSeconds > 0 ? 0.5 : 1);
+        const sm = slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1;
+        const newSpeed = curSpeed - GRAVITY * Math.sign(curAngle) * sm;
+        const newAngle = curAngle + newSpeed * sm;
         skateSpeedRef.current = newSpeed;
         skateAngleRef.current = newAngle;
         setSkateSpeed(newSpeed);
         setSkateAngle(newAngle);
 
         // Land when angle crosses 0
-        if (Math.abs(newAngle) < 0.05 && Math.abs(newSpeed) < 0.03) {
+        if (Math.abs(newAngle) < SKATE.LAND_ANGLE_THRESHOLD && Math.abs(newSpeed) < SKATE.LAND_SPEED_THRESHOLD) {
           skateAirborneRef.current = false;
           setSkateAirborne(false);
-          setMessage(`Landed! +${50 * activeCharacter.shieldBonus} pts`);
-          setScore((c) => c + 50 * activeCharacter.shieldBonus);
+          const landBonus = SKATE.LAND_BONUS_PER_SHIELD * activeCharacter.shieldBonus;
+
+          // Style Meter completion: pump(1)→airborne(2)→tricked(3)→land
+          if (stylePhaseRef.current === 3) {
+            const styleBonus = SKATE.STYLE_BONUS;
+            setScore((c) => c + landBonus + styleBonus);
+            setMessage(`🎨 STYLE BONUS! +${styleBonus} pts!`);
+            triggerAudioHook(AUDIO_HOOKS.skate.STYLE_BONUS, 340);
+            runSummaryRef.current = { ...runSummaryRef.current, styleBonuses: (runSummaryRef.current.styleBonuses ?? 0) + 1 };
+            if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          } else {
+            setScore((c) => c + landBonus);
+            setMessage(`Landed! +${landBonus} pts`);
+            triggerAudioHook(AUDIO_HOOKS.skate.LAND, 260);
+          }
+          runSummaryRef.current = { ...runSummaryRef.current, cleanLandings: (runSummaryRef.current.cleanLandings ?? 0) + 1 };
+          if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          // Reset style meter after landing
+          stylePhaseRef.current = 0;
+          setStylePhase(0);
+          styleTicksRef.current = 0;
+          setStyleTicks(0);
         }
       } else {
-        // In-pipe physics: gravity toward bottom
-        const newSpeed = (curSpeed - GRAVITY * Math.sin(curAngle) * (slowMotionSeconds > 0 ? 0.5 : 1)) * FRICTION;
-        const newAngle = curAngle + newSpeed * (slowMotionSeconds > 0 ? 0.5 : 1);
+        const sm = slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1;
+        const newSpeed = (curSpeed - GRAVITY * Math.sin(curAngle) * sm) * FRICTION;
+        const newAngle = curAngle + newSpeed * sm;
         skateSpeedRef.current = newSpeed;
         skateAngleRef.current = newAngle;
         setSkateSpeed(newSpeed);
@@ -490,15 +1076,25 @@ export default function App() {
 
         // Launch off coping
         if (Math.abs(newAngle) > PIPE_RADIUS) {
+          if (tickRef.current < skateAirCooldownRef.current) return;
+          skateAirCooldownRef.current = tickRef.current + SKATE.AIR_EVENT_COOLDOWN_TICKS;
           skateAirborneRef.current = true;
           setSkateAirborne(true);
-          const trick = TRICK_NAMES[Math.floor(Math.random() * TRICK_NAMES.length)];
+          const trick = trickPool[Math.floor(Math.random() * trickPool.length)];
           setSkateTrick(trick);
           setMessage(`Airborne! Tap for ${trick}!`);
+          triggerAudioHook(AUDIO_HOOKS.skate.AIR, 260);
+          if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+          // Style Meter: advance from pump(1) to airborne(2)
+          if (stylePhaseRef.current === 1) {
+            stylePhaseRef.current = 2;
+            setStylePhase(2);
+          }
           if (skateTrickTimeoutRef.current) clearTimeout(skateTrickTimeoutRef.current);
-          skateTrickTimeoutRef.current = setTimeout(() => setSkateTrick(null), 2000);
-          // Spawn rail sometimes
-          if (Math.random() > 0.5) {
+          skateTrickTimeoutRef.current = setTimeout(() => setSkateTrick(null), SKATE.TRICK_DISPLAY_MS);
+          let railSpawnChance = stage === 3 ? SKATE.RAIL_SPAWN_CHANCE_S3 : stage === 2 ? SKATE.RAIL_SPAWN_CHANCE_S2 : SKATE.RAIL_SPAWN_CHANCE_S1;
+          if (challengeModifier === 'rail-jam') railSpawnChance = Math.min(1, railSpawnChance + 0.3);
+          if (Math.random() < railSpawnChance) {
             setSkateRails((r) => [
               ...r.slice(-2),
               { id: Date.now(), side: newAngle > 0 ? 'right' : 'left', active: true },
@@ -515,7 +1111,7 @@ export default function App() {
 
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, selectedMode, slowMotionSeconds, activeCharacter.shieldBonus]);
+  }, [isPlaying, selectedMode, slowMotionSeconds, activeCharacter.shieldBonus, reducedMotion]);
 
   // ══════════════════════════════════════════════════════════════════════════
   //  HACKEY GAME LOOP
@@ -523,37 +1119,63 @@ export default function App() {
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'hackey') return;
 
-    const BASE_WINDOW_DRAIN = 0.018; // per tick
+    const checkMilestones = (currentScore: number) => {
+      for (const m of MILESTONES.hackey) {
+        if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
+          milestoneReachedRef.current.add(m);
+          setMilestoneMsg(`🤸 Milestone: ${m} pts!`);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      }
+    };
 
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
+      const challengeModifier = activeDailyChallengeRef.current?.mode === 'hackey'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
 
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
-      const drain = (slowMotionSeconds > 0 ? 0.5 : 1) * BASE_WINDOW_DRAIN *
-        (1 + hackeyCombo * 0.03); // gets faster with combo
+      const stage = tickRef.current >= STAGE3_TICK ? 3 : tickRef.current >= STAGE2_TICK ? 2 : 1;
+      if (stage !== diffStageRef.current) {
+        diffStageRef.current = stage;
+        setDiffStage(stage as 1 | 2 | 3);
+        setMessage(stage === 2 ? '🤸 Rhythm speeding up!' : '🤸 Final rhythm push!');
+        triggerAudioHook(AUDIO_HOOKS.hackey.STAGE_UP, 500);
+        setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
+      }
+
+      const stageDrain = stage === 3 ? HACKEY.BASE_DRAIN_S3 : stage === 2 ? HACKEY.BASE_DRAIN_S2 : HACKEY.BASE_DRAIN_S1;
+      let drain = (slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1) * stageDrain *
+        (1 + hackeyCombo * HACKEY.COMBO_DRAIN_FACTOR);
+      if (challengeModifier === 'hot-potato') drain *= 1.18;
       const newWindow = hackeyWindowRef.current - drain;
 
       if (newWindow <= 0) {
-        // Missed! 
         const newMisses = hackeyMissesRef.current + 1;
         hackeyMissesRef.current = newMisses;
         setHackeyMisses(newMisses);
         setHackeyCombo(0);
-        setMessage(`Miss! ${3 - newMisses} chances left`);
+        setMessage(`Miss! ${HACKEY.MISS_LIMIT - newMisses} chances left`);
+        setHitFlash(true);
+        triggerAudioHook(AUDIO_HOOKS.hackey.MISS, 280);
+        setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
+        if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
 
-        if (newMisses >= 3) {
+        if (newMisses >= HACKEY.MISS_LIMIT) {
           isPlayingRef.current = false;
           setIsPlaying(false);
+          setRunSummary({ ...runSummaryRef.current });
           setBestScores((c) => ({ ...c, hackey: Math.max(c.hackey, score) }));
           return;
         }
 
-        // Next target
-        const nextTarget = Math.floor(Math.random() * 6);
+        const nextTarget = Math.floor(Math.random() * HACKEY.TARGET_COUNT);
         hackeyTargetRef.current = nextTarget;
         hackeyWindowRef.current = 1;
         setHackeyTarget(nextTarget);
@@ -561,7 +1183,17 @@ export default function App() {
       } else {
         hackeyWindowRef.current = newWindow;
         setHackeyWindow(newWindow);
-        setScore((c) => c + 1);
+        setScore((c) => {
+          const next = c + 1;
+          checkMilestones(next);
+          return next;
+        });
+      }
+
+      if (newWindow > 0 && newWindow <= HACKEY.DANGER_WINDOW && Date.now() - recentHackeyDangerRef.current > 450) {
+        recentHackeyDangerRef.current = Date.now();
+        setMessage('⚠️ Late window!');
+        triggerAudioHook(AUDIO_HOOKS.hackey.DANGER, 300);
       }
 
       // Animate sack position toward target player
@@ -569,14 +1201,14 @@ export default function App() {
       const cx = 0.5 + Math.cos(targetPlayer.angle) * 0.35;
       const cy = 0.5 + Math.sin(targetPlayer.angle) * 0.35;
       setHackeySackPos((prev) => ({
-        x: prev.x + (cx - prev.x) * 0.1,
-        y: prev.y + (cy - prev.y) * 0.1,
+        x: prev.x + (cx - prev.x) * HACKEY.SACK_LERP,
+        y: prev.y + (cy - prev.y) * HACKEY.SACK_LERP,
       }));
     }, TICK_MS);
 
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, selectedMode, slowMotionSeconds, hackeyCombo, score, HACKEY_PLAYERS]);
+  }, [isPlaying, selectedMode, slowMotionSeconds, hackeyCombo, score, HACKEY_PLAYERS, reducedMotion]);
 
   // ══════════════════════════════════════════════════════════════════════════
   //  SKYDIVE GAME LOOP
@@ -584,28 +1216,63 @@ export default function App() {
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'skydive') return;
 
-    const GATE_GAP = 0.28 + activeCharacter.controlBonus * 0.12; // fraction of width that is "safe" in each gate
+    const checkMilestones = (currentScore: number) => {
+      for (const m of MILESTONES.skydive) {
+        if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
+          milestoneReachedRef.current.add(m);
+          setMilestoneMsg(`🪂 Milestone: ${m} pts!`);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      }
+    };
 
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
-      setScore((c) => c + 1);
+      const challengeModifier = activeDailyChallengeRef.current?.mode === 'skydive'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
+      setScore((c) => {
+        const next = c + 1;
+        checkMilestones(next);
+        return next;
+      });
 
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
-      const speed = slowMotionSeconds > 0 ? 0.008 : 0.016;
+      // Difficulty stage based on altitude
+      setSkyAltitude((a) => {
+        const next = Math.max(0, a - 50);
+        const altStage = next <= SKYDIVE.ALT_STAGE3 ? 3 : next <= SKYDIVE.ALT_STAGE2 ? 2 : 1;
+        if (altStage !== diffStageRef.current) {
+          diffStageRef.current = altStage;
+          setDiffStage(altStage as 1 | 2 | 3);
+          setMessage(altStage === 2 ? '🌩 Wind picking up!' : '⚡ Storm layer — max turbulence!');
+          triggerAudioHook(AUDIO_HOOKS.skydive.STAGE_UP, 500);
+          setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
+        }
+        return next;
+      });
 
-      // Descend altitude
-      setSkyAltitude((a) => Math.max(0, a - 50));
+      const stage = diffStageRef.current;
+      const GATE_GAP = (stage === 3 ? SKYDIVE.GATE_GAP_S3 : stage === 2 ? SKYDIVE.GATE_GAP_S2 : SKYDIVE.GATE_GAP_S1)
+        + activeCharacter.controlBonus * SKYDIVE.CONTROL_GAP_BONUS_MULT;
+      let stageSpeed = stage === 3 ? SKYDIVE.SPEED_S3 : stage === 2 ? SKYDIVE.SPEED_S2 : SKYDIVE.SPEED_S1;
+      if (challengeModifier === 'ring-rush') stageSpeed += 0.0015;
+      const speed = stageSpeed * (slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1);
+      let gateSpawn = stage === 3 ? SKYDIVE.GATE_SPAWN_S3 : stage === 2 ? SKYDIVE.GATE_SPAWN_S2 : SKYDIVE.GATE_SPAWN_S1;
+      let cloudSpawn = stage === 3 ? SKYDIVE.CLOUD_SPAWN_S3 : stage === 2 ? SKYDIVE.CLOUD_SPAWN_S2 : SKYDIVE.CLOUD_SPAWN_S1;
+      if (challengeModifier === 'ring-rush') gateSpawn = Math.max(16, gateSpawn - 6);
+      if (challengeModifier === 'cloudburst') cloudSpawn = Math.max(14, cloudSpawn - 8);
 
-      // Move gates down the screen and spawn new ones
       setSkyGates((gates) => {
         const moved = gates
           .map((g) => ({ ...g, y: g.y + speed }))
           .filter((g) => g.y < 1.15);
-        if (tickRef.current % 55 === 0) {
+        if (tickRef.current % gateSpawn === 0) {
           moved.push({
             id: Date.now() + Math.random(),
             y: -0.1,
@@ -615,46 +1282,89 @@ export default function App() {
         return moved;
       });
 
-      // Move clouds
       setSkyClouds((clouds) => {
         const moved = clouds
           .map((c) => ({ ...c, y: c.y + speed * 0.5 }))
           .filter((c) => c.y < 1.1);
-        if (tickRef.current % 30 === 0) {
+        if (tickRef.current % cloudSpawn === 0) {
           moved.push({
             id: Date.now() + Math.random(),
             x: Math.random(),
             y: -0.05,
-            r: 0.07 + Math.random() * 0.08,
+            r:
+              SKYDIVE.CLOUD_RADIUS_MIN
+              + Math.random() * (SKYDIVE.CLOUD_RADIUS_MAX - SKYDIVE.CLOUD_RADIUS_MIN)
+              + (challengeModifier === 'cloudburst' ? 0.015 : 0),
           });
         }
         return moved;
       });
+      if (challengeModifier === 'jetstream') {
+        const drift = Math.cos(tickRef.current / 14) * 0.006;
+        const nextX = clamp(skyXRef.current + drift, 0.05, 0.95);
+        skyXRef.current = nextX;
+        setSkyX(nextX);
+      }
 
-      // Collision checks
+      // Collision checks — gate
       setSkyGates((gates) => {
         const sx = skyXRef.current;
         const hit = gates.find((g) => {
-          // Gate is at y ~0.8 (near player who is at 0.82)
-          if (g.y < 0.76 || g.y > 0.88) return false;
+          if (g.y < SKYDIVE.GATE_PASS_Y_MIN || g.y > SKYDIVE.GATE_PASS_Y_MAX) return false;
           const leftWall = g.gapX - GATE_GAP / 2;
           const rightWall = g.gapX + GATE_GAP / 2;
           return sx < leftWall || sx > rightWall;
         });
-        const cleared = gates.find((g) => g.y > 0.76 && g.y < 0.88 &&
+        const clearedGate = gates.find((g) => g.y > SKYDIVE.GATE_PASS_Y_MIN && g.y < SKYDIVE.GATE_PASS_Y_MAX &&
           sx >= g.gapX - GATE_GAP / 2 && sx <= g.gapX + GATE_GAP / 2);
-        if (cleared) {
-          setSkyGatesCleared((c) => c + 1);
-          setScore((c) => c + 25);
+        const dangerGate = !hit && gates.find((g) => g.y > SKYDIVE.GATE_PASS_Y_MIN && g.y < SKYDIVE.GATE_PASS_Y_MAX && (
+          Math.abs(sx - (g.gapX - GATE_GAP / 2)) < SKYDIVE.DANGER_CENTER_MARGIN
+          || Math.abs(sx - (g.gapX + GATE_GAP / 2)) < SKYDIVE.DANGER_CENTER_MARGIN
+        ));
+        if (dangerGate && Date.now() - recentSkydiveDangerRef.current > 350) {
+          recentSkydiveDangerRef.current = Date.now();
+          setMessage('⚠️ Tight gap!');
+          triggerAudioHook(AUDIO_HOOKS.skydive.DANGER, 260);
+          if (!reducedMotion) void Haptics.selectionAsync();
+        }
+        if (clearedGate) {
+          const isPerfect = Math.abs(sx - clearedGate.gapX) <= SKYDIVE.PERFECT_CENTER_MARGIN;
+          const gateScore = (isPerfect ? SKYDIVE.PERFECT_GATE_SCORE : SKYDIVE.GATE_SCORE)
+            + (challengeModifier === 'ring-rush' ? 10 : 0);
+          setSkyGatesCleared((c) => {
+            const next = c + 1;
+            runSummaryRef.current = { ...runSummaryRef.current, gatesCleared: next };
+            return next;
+          });
+          setScore((c) => c + gateScore);
+          if (isPerfect) {
+            runSummaryRef.current = { ...runSummaryRef.current, perfectThreads: (runSummaryRef.current.perfectThreads ?? 0) + 1 };
+            setLastGatePerfect(true);
+            setMessage(`🎯 Perfect thread! +${gateScore}`);
+            triggerAudioHook(AUDIO_HOOKS.skydive.GATE_PERFECT, 220);
+            setTimeout(() => setLastGatePerfect(false), 600);
+          } else {
+            triggerAudioHook(AUDIO_HOOKS.skydive.GATE_CLEAR, 180);
+          }
+          if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         }
         if (hit) {
           if (shields > 0) {
             setShields((s) => s - 1);
             setMessage('Clipped the gate! Shield saved you!');
+            setHitFlash(true);
+            triggerAudioHook(AUDIO_HOOKS.skydive.HIT, 260);
+            setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
+            if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             return gates.filter((g) => g.id !== hit.id);
           }
           isPlayingRef.current = false;
           setIsPlaying(false);
+          setHitFlash(true);
+          triggerAudioHook(AUDIO_HOOKS.skydive.HIT, 260);
+          setTimeout(() => setHitFlash(false), FEEDBACK.FATAL_FLASH_MS);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+          setRunSummary({ ...runSummaryRef.current });
           setBestScores((b) => ({ ...b, skydive: Math.max(b.skydive, score) }));
         }
         return gates;
@@ -672,10 +1382,19 @@ export default function App() {
           if (shields > 0) {
             setShields((s) => s - 1);
             setMessage('Turbulence! Shield absorbed!');
+            setHitFlash(true);
+            triggerAudioHook(AUDIO_HOOKS.skydive.HIT, 260);
+            setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
+            if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             return clouds.filter((c) => c.id !== hit.id);
           }
           isPlayingRef.current = false;
           setIsPlaying(false);
+          setHitFlash(true);
+          triggerAudioHook(AUDIO_HOOKS.skydive.HIT, 260);
+          setTimeout(() => setHitFlash(false), FEEDBACK.FATAL_FLASH_MS);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+          setRunSummary({ ...runSummaryRef.current });
           setBestScores((b) => ({ ...b, skydive: Math.max(b.skydive, score) }));
         }
         return clouds;
@@ -684,7 +1403,7 @@ export default function App() {
 
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeCharacter.controlBonus, isPlaying, selectedMode, slowMotionSeconds, shields, score]);
+  }, [activeCharacter.controlBonus, isPlaying, selectedMode, slowMotionSeconds, shields, score, reducedMotion]);
 
   // ══════════════════════════════════════════════════════════════════════════
   //  BOX RACE GAME LOOP
@@ -693,44 +1412,113 @@ export default function App() {
     if (!isPlaying || selectedMode !== 'boxrace') return;
 
     const BOX_COLORS = ['#FF4444', '#FF9900', '#CC44FF', '#FF66AA', '#44DDAA'];
-    const COLLISION_THRESHOLD = 0.1 - activeCharacter.controlBonus * 0.18;
-    const BOOST_PICKUP_THRESHOLD = 0.1;
+    const COLLISION_THRESHOLD = BOXRACE.COLLISION_THRESHOLD_BASE - activeCharacter.controlBonus * BOXRACE.COLLISION_CONTROL_BONUS_MULT;
+
+    const checkMilestones = (currentScore: number) => {
+      for (const m of MILESTONES.boxrace) {
+        if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
+          milestoneReachedRef.current.add(m);
+          setMilestoneMsg(`📦 Milestone: ${m} pts!`);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      }
+    };
 
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
+      const challengeModifier = activeDailyChallengeRef.current?.mode === 'boxrace'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
 
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
-      // Increase racer speed over time
-      setRacerSpeed((s) => Math.min(s + 0.0004, 0.025));
-      const baseSpeed = slowMotionSeconds > 0 ? 0.01 : racerSpeed;
+      // Difficulty stage
+      const stage = tickRef.current >= STAGE3_TICK ? 3 : tickRef.current >= STAGE2_TICK ? 2 : 1;
+      if (stage !== diffStageRef.current) {
+        diffStageRef.current = stage;
+        setDiffStage(stage as 1 | 2 | 3);
+        setMessage(stage === 2 ? '📦 Rivals getting aggressive!' : '📦 DANGER ZONE!');
+        triggerAudioHook(AUDIO_HOOKS.boxrace.STAGE_UP, 500);
+        setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
+      }
 
-      // Move rival boxes toward player and spawn new ones
+      let boxSpawn = stage === 3 ? BOXRACE.BOX_SPAWN_S3 : stage === 2 ? BOXRACE.BOX_SPAWN_S2 : BOXRACE.BOX_SPAWN_S1;
+      if (challengeModifier === 'turbo-grid') boxSpawn = Math.max(14, boxSpawn - 6);
+
+      setRacerSpeed((s) => {
+        const next = Math.min(s + BOXRACE.SPEED_ACCEL, BOXRACE.MAX_SPEED);
+        runSummaryRef.current = { ...runSummaryRef.current, maxSpeed: next };
+        return next;
+      });
+      const baseSpeed = slowMotionSeconds > 0 ? racerSpeed * SLOW_MOTION_SPEED_MULT : racerSpeed;
+      if (challengeModifier === 'sidewind') {
+        const drift = Math.sin(tickRef.current / 15) * 0.006;
+        const nextX = clamp(racerXRef.current + drift, 0.08, 0.92);
+        racerXRef.current = nextX;
+        setRacerX(nextX);
+      }
+
+      // Slipstream mechanic: stay close behind a rival for bonus speed
       setRaceBoxes((boxes) => {
+        const rx = racerXRef.current;
+        const slipTarget = boxes.find((b) =>
+          Math.abs(rx - b.x) <= BOXRACE.SLIPSTREAM_DIST && b.y > BOXRACE.SLIPSTREAM_Y_MIN && b.y < BOXRACE.SLIPSTREAM_Y_MAX,
+        );
+        if (slipTarget) {
+          const newTicks = slipstreamTicksRef.current + 1;
+          slipstreamTicksRef.current = newTicks;
+          setSlipstreamTicks(newTicks);
+          if (newTicks % 10 === 0) triggerAudioHook(AUDIO_HOOKS.boxrace.SLIPSTREAM_CHARGE, 100);
+          if (newTicks >= BOXRACE.SLIPSTREAM_TICKS && !slipstreamActiveRef.current) {
+            slipstreamActiveRef.current = true;
+            setSlipstreamActive(true);
+            setScore((c) => c + BOXRACE.SLIPSTREAM_SCORE);
+            setMessage(`💨 SLIPSTREAM! +${BOXRACE.SLIPSTREAM_SCORE} speed burst!`);
+            triggerAudioHook(AUDIO_HOOKS.boxrace.SLIPSTREAM_BURST, 300);
+            runSummaryRef.current = { ...runSummaryRef.current, slipstreams: (runSummaryRef.current.slipstreams ?? 0) + 1 };
+            if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+            setTimeout(() => {
+              slipstreamActiveRef.current = false;
+              setSlipstreamActive(false);
+              slipstreamTicksRef.current = 0;
+              setSlipstreamTicks(0);
+            }, BOXRACE.SLIPSTREAM_ACTIVE_MS);
+          }
+        } else {
+          if (!slipstreamActiveRef.current) {
+            slipstreamTicksRef.current = 0;
+            setSlipstreamTicks(0);
+          }
+        }
+
         const moved = boxes
           .map((b) => ({ ...b, y: b.y + (baseSpeed + b.speed) }))
           .filter((b) => b.y < 1.05);
-        if (tickRef.current % 35 === 0) {
+        if (tickRef.current % boxSpawn === 0) {
           moved.push({
             id: Date.now() + Math.random(),
             x: 0.1 + Math.random() * 0.7,
             y: -0.08,
-            speed: 0.005 + Math.random() * 0.008,
+            speed:
+              BOXRACE.RIVAL_SPEED_MIN
+              + Math.random() * (BOXRACE.RIVAL_SPEED_MAX - BOXRACE.RIVAL_SPEED_MIN)
+              + (challengeModifier === 'turbo-grid' ? 0.002 : 0),
             color: BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)],
           });
         }
         return moved;
       });
 
-      // Move boost pads
       setRaceBoosts((boosts) => {
         const moved = boosts
           .map((b) => ({ ...b, y: b.y + baseSpeed }))
           .filter((b) => b.y < 1.05);
-        if (tickRef.current % 80 === 0) {
+        const boostSpawn = challengeModifier === 'boost-parade' ? Math.max(24, BOXRACE.BOOST_SPAWN - 22) : BOXRACE.BOOST_SPAWN;
+        if (tickRef.current % boostSpawn === 0) {
           moved.push({
             id: Date.now() + Math.random(),
             x: 0.15 + Math.random() * 0.65,
@@ -740,38 +1528,62 @@ export default function App() {
         return moved;
       });
 
-      setScore((c) => c + 1);
+      setScore((c) => {
+        const next = c + 1;
+        checkMilestones(next);
+        return next;
+      });
 
-      // Collision with rival boxes
       setRaceBoxes((boxes) => {
         const rx = racerXRef.current;
         const hit = boxes.find((b) => {
           const dx = Math.abs(rx - b.x);
-          return dx < COLLISION_THRESHOLD && b.y > 0.8 && b.y < 0.96;
+          return dx < COLLISION_THRESHOLD && b.y > BOXRACE.COLLISION_Y_MIN && b.y < BOXRACE.COLLISION_Y_MAX;
         });
+        const danger = !hit && boxes.find((b) => {
+          const dx = Math.abs(rx - b.x);
+          return dx < COLLISION_THRESHOLD + BOXRACE.DANGER_X_MARGIN && b.y > BOXRACE.COLLISION_Y_MIN && b.y < BOXRACE.COLLISION_Y_MAX;
+        });
+        if (danger && Date.now() - recentBoxDangerRef.current > 350) {
+          recentBoxDangerRef.current = Date.now();
+          setMessage('⚠️ Incoming rival!');
+          triggerAudioHook(AUDIO_HOOKS.boxrace.DANGER, 260);
+          if (!reducedMotion) void Haptics.selectionAsync();
+        }
         if (hit) {
           if (shields > 0) {
             setShields((s) => s - 1);
             setMessage('Crash! Shield absorbed it!');
+            setHitFlash(true);
+            triggerAudioHook(AUDIO_HOOKS.boxrace.HIT, 260);
+            setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
+            if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             return boxes.filter((b) => b.id !== hit.id);
           }
           isPlayingRef.current = false;
           setIsPlaying(false);
+          setHitFlash(true);
+          triggerAudioHook(AUDIO_HOOKS.boxrace.HIT, 260);
+          setTimeout(() => setHitFlash(false), FEEDBACK.FATAL_FLASH_MS);
+          if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+          setRunSummary({ ...runSummaryRef.current });
           setBestScores((b) => ({ ...b, boxrace: Math.max(b.boxrace, score) }));
         }
         return boxes;
       });
 
-      // Pick up boost pads
       setRaceBoosts((boosts) => {
         const rx = racerXRef.current;
         const hit = boosts.find((b) => {
           const dx = Math.abs(rx - b.x);
-          return dx < BOOST_PICKUP_THRESHOLD && b.y > 0.8 && b.y < 0.96;
+          return dx < BOXRACE.BOOST_PICKUP_THRESHOLD && b.y > BOXRACE.BOOST_PICKUP_Y_MIN && b.y < BOXRACE.BOOST_PICKUP_Y_MAX;
         });
         if (hit) {
-          setScore((c) => c + 30);
-          setMessage('⚡ Boost! +30');
+          setScore((c) => c + BOXRACE.BOOST_SCORE);
+          setMessage(`⚡ Boost! +${BOXRACE.BOOST_SCORE}`);
+          triggerAudioHook(AUDIO_HOOKS.boxrace.BOOST, 220);
+          runSummaryRef.current = { ...runSummaryRef.current, boostsCollected: (runSummaryRef.current.boostsCollected ?? 0) + 1 };
+          if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         }
         return hit ? boosts.filter((b) => b.id !== hit.id) : boosts;
       });
@@ -779,13 +1591,14 @@ export default function App() {
 
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeCharacter.controlBonus, isPlaying, selectedMode, slowMotionSeconds, shields, score, racerSpeed]);
+  }, [activeCharacter.controlBonus, isPlaying, selectedMode, slowMotionSeconds, shields, score, racerSpeed, reducedMotion]);
 
   const resetGameState = useCallback((mode: GameModeKey) => {
     tickRef.current = 0;
     rewardedAtGameOverRef.current = false;
     setScore(0);
     setMessage('');
+    setRunEndMeta(null);
     setSlowMotionSeconds(0);
     // Surf
     setSurferX(0.5);
@@ -793,6 +1606,7 @@ export default function App() {
     setWaveZones([]);
     setTrickAirborne(false);
     setTubeMultiplier(1);
+    tubeMultiplierRef.current = 1;
     surfWavePhase.current = 0;
     // Skate
     setSkateAngle(0);
@@ -804,7 +1618,7 @@ export default function App() {
     skateSpeedRef.current = 0.04;
     skateAirborneRef.current = false;
     // Hackey
-    const firstTarget = Math.floor(Math.random() * 6);
+    const firstTarget = Math.floor(Math.random() * HACKEY.TARGET_COUNT);
     setHackeyTarget(firstTarget);
     setHackeyWindow(1);
     setHackeyMisses(0);
@@ -826,29 +1640,63 @@ export default function App() {
     setRaceBoxes([]);
     setRaceBoosts([]);
     setRacerSpeed(0.008);
+    // Mastery / feedback state
+    setBarrelHoldTicks(0);
+    setBarrelActive(false);
+    barrelActiveRef.current = false;
+    barrelHoldTicksRef.current = 0;
+    setStylePhase(0);
+    setStyleTicks(0);
+    stylePhaseRef.current = 0;
+    styleTicksRef.current = 0;
+    setLastTapPerfect(false);
+    setLastGatePerfect(false);
+    setSlipstreamTicks(0);
+    setSlipstreamActive(false);
+    slipstreamTicksRef.current = 0;
+    slipstreamActiveRef.current = false;
+    setHitFlash(false);
+    setMilestoneMsg('');
+    milestoneReachedRef.current = new Set();
+    setRunSummary({});
+    runSummaryRef.current = {};
+    setDiffStage(1);
+    diffStageRef.current = 1;
   }, []);
 
-  const startGame = useCallback((mode: GameModeKey) => {
+  const startGame = useCallback((mode: GameModeKey, dailyMode = false) => {
     resetGameState(mode);
+    runStartBestRef.current = bestScores[mode];
+    const challenge = dailyMode ? dailyChallenges[mode] : null;
+    setActiveDailyChallenge(challenge);
     setSelectedMode(mode);
     setShields(activeCharacter.shieldBonus);
     setIsPlaying(true);
     isPlayingRef.current = true;
+    hasRunStartedRef.current = true;
     setScreen('game');
     if (controlsTipTimeoutRef.current) clearTimeout(controlsTipTimeoutRef.current);
     setShowControlsTip(true);
-    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), 4500);
-  }, [resetGameState, activeCharacter.shieldBonus]);
+    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), CONTROLS_TIP_DURATION_MS);
+    if (challenge) {
+      setMessage(`${challenge.badge} Daily: ${challenge.modifierName} • ${challenge.objectiveText}`);
+    }
+  }, [resetGameState, activeCharacter.shieldBonus, bestScores, dailyChallenges]);
 
   const restartGame = useCallback(() => {
     resetGameState(selectedMode);
+    runStartBestRef.current = bestScores[selectedMode];
     setShields(activeCharacter.shieldBonus);
     setIsPlaying(true);
     isPlayingRef.current = true;
+    hasRunStartedRef.current = true;
     if (controlsTipTimeoutRef.current) clearTimeout(controlsTipTimeoutRef.current);
     setShowControlsTip(true);
-    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), 4500);
-  }, [resetGameState, selectedMode, activeCharacter.shieldBonus]);
+    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), CONTROLS_TIP_DURATION_MS);
+    if (activeDailyChallengeRef.current) {
+      setMessage(`${activeDailyChallengeRef.current.badge} Daily retry: ${activeDailyChallengeRef.current.objectiveText}`);
+    }
+  }, [resetGameState, selectedMode, activeCharacter.shieldBonus, bestScores]);
 
   // ─── Surf: PanResponder ───────────────────────────────────────────────────
   const surfPanResponder = useMemo(() => PanResponder.create({
@@ -874,14 +1722,21 @@ export default function App() {
       if (gs.vy < FLICK_TRICK_VELOCITY && !trickAirborne) {
         setTrickAirborne(true);
         setMessage('Aerial trick! 🤙');
-        setScore((c) => c + 80);
+        const aerialBonus = activeDailyChallengeRef.current?.mode === 'surf'
+          && activeDailyChallengeRef.current.modifierId === 'air-festival'
+          ? 40
+          : 0;
+        setScore((c) => c + SURF.AERIAL_SCORE + aerialBonus);
+        runSummaryRef.current = { ...runSummaryRef.current, aerials: (runSummaryRef.current.aerials ?? 0) + 1 };
+        triggerAudioHook(AUDIO_HOOKS.surf.AERIAL, 260);
+        if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         setTimeout(() => {
           setTrickAirborne(false);
           setMessage('');
-        }, 1200);
+        }, SURF.AERIAL_DURATION_MS);
       }
     },
-  }), [activeCharacter.controlBonus, selectedMode, trickAirborne]);
+  }), [activeCharacter.controlBonus, selectedMode, trickAirborne, reducedMotion, triggerAudioHook]);
 
   // ─── Skate: PanResponder ──────────────────────────────────────────────────
   const skatePanResponder = useMemo(() => PanResponder.create({
@@ -890,10 +1745,20 @@ export default function App() {
     onPanResponderRelease: (_, gs) => {
       if (!isPlayingRef.current) return;
       if (skateAirborneRef.current) {
-        // Trick tap while airborne
-        setScore((c) => c + 100);
-        setMessage('Trick landed! +100');
+        // Trick tap while airborne — advance style meter to tricked(3)
+        const trickScore = activeDailyChallengeRef.current?.mode === 'skate'
+          && activeDailyChallengeRef.current.modifierId === 'trick-frenzy'
+          ? SKATE.TRICK_SCORE + 50
+          : SKATE.TRICK_SCORE;
+        setScore((c) => c + trickScore);
+        setMessage(`Trick confirmed! +${trickScore}`);
+        triggerAudioHook(AUDIO_HOOKS.skate.TRICK_CONFIRM, 220);
         setSkateTrick(null);
+        if (stylePhaseRef.current === 2) {
+          stylePhaseRef.current = 3;
+          setStylePhase(3);
+        }
+        if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       } else {
         // Pump: swipe left/right gives angular velocity
         const dragX = applyGestureDeadzone(gs.dx);
@@ -901,9 +1766,18 @@ export default function App() {
         const push = -dragX / SCREEN_W * Math.max(0.1, SKATE_PUMP_SENSITIVITY - activeCharacter.controlBonus * 0.35) * sensitivityRef.current;
         skateSpeedRef.current = clamp(skateSpeedRef.current + push, -0.12, 0.12);
         setSkateSpeed(skateSpeedRef.current);
+        triggerAudioHook(AUDIO_HOOKS.skate.PUMP, 180);
+        // Style Meter: pump starts the sequence (phase idle→pump)
+        if (stylePhaseRef.current === 0) {
+          stylePhaseRef.current = 1;
+          setStylePhase(1);
+          styleTicksRef.current = 0;
+          setStyleTicks(0);
+        }
+        if (!reducedMotion) void Haptics.selectionAsync();
       }
     },
-  }), [activeCharacter.controlBonus, selectedMode]);
+  }), [activeCharacter.controlBonus, selectedMode, reducedMotion, triggerAudioHook]);
 
   // ─── Skydive: PanResponder ────────────────────────────────────────────────
   const skydivePanResponder = useMemo(() => PanResponder.create({
@@ -951,11 +1825,42 @@ export default function App() {
   const hackeyTap = useCallback((playerId: number) => {
     if (!isPlayingRef.current) return;
     if (playerId === hackeyTargetRef.current) {
-      const bonus = Math.floor(hackeyWindowRef.current * 50) + hackeyCombo * 5;
+      const perfectWindow = activeDailyChallengeRef.current?.mode === 'hackey'
+        && activeDailyChallengeRef.current.modifierId === 'focus-ring'
+        ? HACKEY.PERFECT_WINDOW + 0.08
+        : HACKEY.PERFECT_WINDOW;
+      const isPerfect = hackeyWindowRef.current > perfectWindow;
+      const perfectBonus = activeDailyChallengeRef.current?.mode === 'hackey'
+        && activeDailyChallengeRef.current.modifierId === 'focus-ring'
+        ? HACKEY.PERFECT_BONUS + 4
+        : HACKEY.PERFECT_BONUS;
+      const bonus = Math.floor(hackeyWindowRef.current * 50) + hackeyCombo * 5 + (isPerfect ? perfectBonus : 0);
       setScore((c) => c + bonus);
-      setHackeyCombo((c) => c + 1);
-      setMessage(`Nice! +${bonus} (combo x${hackeyCombo + 1})`);
-      const nextTarget = Math.floor(Math.random() * 6);
+      const nextCombo = hackeyCombo + 1;
+      setHackeyCombo(nextCombo);
+      runSummaryRef.current = { ...runSummaryRef.current, maxCombo: Math.max(runSummaryRef.current.maxCombo ?? 0, nextCombo) };
+      if (isPerfect) {
+        runSummaryRef.current = { ...runSummaryRef.current, perfectTaps: (runSummaryRef.current.perfectTaps ?? 0) + 1 };
+        setLastTapPerfect(true);
+        setMessage(`⚡ PERFECT! +${bonus} (combo x${nextCombo})`);
+        triggerAudioHook(AUDIO_HOOKS.hackey.TAP_PERFECT, 220);
+        setTimeout(() => setLastTapPerfect(false), 500);
+        if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+      } else {
+        setMessage(`Nice! +${bonus} (combo x${nextCombo})`);
+        triggerAudioHook(AUDIO_HOOKS.hackey.TAP_GOOD, 200);
+        if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      }
+      if (nextCombo > 0 && nextCombo % FEEDBACK.COMBO_BURST_INTERVAL === 0) {
+        setMessage(`🔥 Combo burst x${nextCombo}!`);
+        triggerAudioHook(AUDIO_HOOKS.hackey.COMBO_BURST, 280);
+      }
+      const shouldEcho = activeDailyChallengeRef.current?.mode === 'hackey'
+        && activeDailyChallengeRef.current.modifierId === 'echo-target'
+        && Math.random() < 0.35;
+      const nextTarget = shouldEcho
+        ? hackeyTargetRef.current
+        : Math.floor(Math.random() * HACKEY.TARGET_COUNT);
       hackeyTargetRef.current = nextTarget;
       hackeyWindowRef.current = 1;
       setHackeyTarget(nextTarget);
@@ -965,14 +1870,19 @@ export default function App() {
       hackeyMissesRef.current = newMisses;
       setHackeyMisses(newMisses);
       setHackeyCombo(0);
-      setMessage(`Wrong player! ${3 - newMisses} left`);
-      if (newMisses >= 3) {
+      setMessage(`Wrong player! ${HACKEY.MISS_LIMIT - newMisses} left`);
+      setHitFlash(true);
+      triggerAudioHook(AUDIO_HOOKS.hackey.MISS, 220);
+      setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
+      if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      if (newMisses >= HACKEY.MISS_LIMIT) {
         isPlayingRef.current = false;
         setIsPlaying(false);
+        setRunSummary({ ...runSummaryRef.current });
         setBestScores((c) => ({ ...c, hackey: Math.max(c.hackey, score) }));
       }
     }
-  }, [hackeyCombo, score]);
+  }, [hackeyCombo, score, reducedMotion, triggerAudioHook]);
 
   // ─── Ad ───────────────────────────────────────────────────────────────────
   const watchRewardAd = useCallback(() => {
@@ -1112,6 +2022,24 @@ export default function App() {
     </View>
   );
 
+  const renderChallengeBanner = () => {
+    if (!activeDailyChallenge) return null;
+    const progress = getObjectiveProgress(activeDailyChallenge.objectiveId, score, runSummaryRef.current);
+    const isComplete = progress >= activeDailyChallenge.objectiveTarget;
+    return (
+      <View style={styles.challengeBanner}>
+        <Text style={styles.challengeBannerTitle}>
+          {activeDailyChallenge.badge} Daily • {activeDailyChallenge.modifierName}
+        </Text>
+        <Text style={styles.challengeBannerText}>{activeDailyChallenge.modifierText}</Text>
+        <Text style={styles.challengeBannerObjective}>
+          Objective: {activeDailyChallenge.objectiveText} ({Math.min(progress, activeDailyChallenge.objectiveTarget)}/{activeDailyChallenge.objectiveTarget})
+          {isComplete ? ' ✓' : ''}
+        </Text>
+      </View>
+    );
+  };
+
   const renderSurfGame = () => {
     const waveY = 55 + Math.sin(surfWavePhase.current) * 4;
     return (
@@ -1197,10 +2125,19 @@ export default function App() {
 
         {/* HUD labels */}
         <View style={styles.surfHudOverlay}>
-          {tubeMultiplier > 1 && (
+          {tubeMultiplier > 1 && !barrelActive && (
             <Text style={styles.tubeLabel}>🌊 TUBE x{tubeMultiplier}</Text>
           )}
+          {barrelActive && (
+            <Text style={[styles.tubeLabel, { color: '#FFD700', fontSize: 18 }]}>🛢 BARREL x3!</Text>
+          )}
           {trickAirborne && <Text style={styles.trickLabel}>✈️ AERIAL!</Text>}
+          {/* Barrel charge indicator */}
+          {!barrelActive && tubeMultiplier > 1 && barrelHoldTicks > 0 && (
+            <View style={styles.barrelChargeBar}>
+              <View style={[styles.barrelChargeFill, { width: `${(barrelHoldTicks / SURF.BARREL_HOLD_TICKS) * 100}%` as `${number}%` }]} />
+            </View>
+          )}
         </View>
 
         {/* Controls tutorial — auto-hides after 4.5 s */}
@@ -1208,9 +2145,12 @@ export default function App() {
           <View style={styles.controlsTipOverlay}>
             <Text style={styles.controlsTipTitle}>🌊 Surf Controls</Text>
             <Text style={styles.controlsTipLine}>← → Drag to steer along the wave face</Text>
-            <Text style={styles.controlsTipLine}>⬆ Flick UP quickly to launch an aerial (+80 pts)</Text>
-            <Text style={styles.controlsTipLine}>⭐ Centre zone = 2× score multiplier</Text>
+            <Text style={styles.controlsTipLine}>⬆ Flick UP quickly to launch an aerial (+{SURF.AERIAL_SCORE} pts)</Text>
+            <Text style={styles.controlsTipLine}>⭐ Centre zone = 2× score — hold for BARREL bonus!</Text>
             <Text style={styles.controlsTipLine}>⚠ Dodge the whitewater closeout sections!</Text>
+            {activeDailyChallenge?.mode === 'surf' && (
+              <Text style={styles.controlsTipLine}>🌊 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+            )}
             <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
           </View>
         )}
@@ -1298,6 +2238,21 @@ export default function App() {
         {/* Hint */}
         <Text style={styles.skateHint}>Swipe ← → to pump  •  Airborne? Tap to score!</Text>
 
+        {/* Style Meter */}
+        {stylePhase > 0 && (
+          <View style={styles.styleMeterWrap}>
+            <Text style={styles.styleMeterLabel}>
+              {stylePhase === 1 ? '🛹 Pumped!' : stylePhase === 2 ? '✈️ Airborne!' : '⚡ Trick! Now land!'}
+            </Text>
+            <View style={styles.styleMeterBar}>
+              <View style={[styles.styleMeterFill, {
+                width: `${Math.max(0, (1 - styleTicks / SKATE.STYLE_WINDOW_TICKS)) * 100}%` as `${number}%`,
+                backgroundColor: styleTicks < SKATE.STYLE_WINDOW_TICKS * 0.6 ? '#A0FF80' : '#FFD700',
+              }]} />
+            </View>
+          </View>
+        )}
+
         {/* Controls tutorial */}
         {showControlsTip && (
           <View style={styles.controlsTipOverlay}>
@@ -1305,7 +2260,10 @@ export default function App() {
             <Text style={styles.controlsTipLine}>← → Swipe left or right to pump up the walls</Text>
             <Text style={styles.controlsTipLine}>🚀 Build speed to launch off the coping</Text>
             <Text style={styles.controlsTipLine}>✈ When airborne → TAP the screen to score</Text>
-            <Text style={styles.controlsTipLine}>🏅 Land cleanly for bonus points!</Text>
+            <Text style={styles.controlsTipLine}>🎨 Pump→Launch→Trick→Land = Style Bonus!</Text>
+            {activeDailyChallenge?.mode === 'skate' && (
+              <Text style={styles.controlsTipLine}>🛹 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+            )}
             <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
           </View>
         )}
@@ -1378,7 +2336,9 @@ export default function App() {
               {
                 width: `${hackeyWindow * 100}%` as `${number}%`,
                 backgroundColor:
-                  hackeyWindow > 0.5
+                  hackeyWindow > HACKEY.PERFECT_WINDOW
+                    ? '#A0FF80'
+                    : hackeyWindow > 0.5
                     ? '#7ED8A0'
                     : hackeyWindow > 0.25
                     ? '#FFD700'
@@ -1386,13 +2346,24 @@ export default function App() {
               },
             ]}
           />
+          {/* Perfect zone marker */}
+          <View style={[styles.hackeyPerfectMarker, { left: `${HACKEY.PERFECT_WINDOW * 100}%` as `${number}%` }]} />
         </View>
+        {hackeyWindow > HACKEY.PERFECT_WINDOW && (
+          <Text style={styles.hackeyPerfectLabel}>⚡ PERFECT ZONE</Text>
+        )}
+        {lastTapPerfect && (
+          <Text style={styles.hackeyPerfectFlash}>🌟 PERFECT!</Text>
+        )}
 
         {/* Combo / Misses display */}
         <View style={styles.hackeyStats}>
-          <Text style={styles.hackeyStatText}>Combo: {hackeyCombo}</Text>
+          <Text style={styles.hackeyStatText}>
+            Combo: {hackeyCombo}
+            {hackeyCombo >= HACKEY.WILD_COMBO_THRESHOLD ? ' 🔥' : hackeyCombo >= HACKEY.FAKE_PLAYER_COMBO_THRESHOLD ? ' ⚡' : ''}
+          </Text>
           <Text style={[styles.hackeyStatText, { color: '#FF6B6B' }]}>
-            {'⚡'.repeat(3 - hackeyMisses)}{'💀'.repeat(hackeyMisses)}
+            {'⚡'.repeat(HACKEY.MISS_LIMIT - hackeyMisses)}{'💀'.repeat(hackeyMisses)}
           </Text>
         </View>
         <Text style={styles.hackeyHint}>Tap the glowing player before the timer drains</Text>
@@ -1401,8 +2372,12 @@ export default function App() {
           <View style={styles.controlsTipOverlay}>
             <Text style={styles.controlsTipTitle}>🤸 Hackey Circle Controls</Text>
             <Text style={styles.controlsTipLine}>👆 Tap the highlighted player to keep the sack alive</Text>
+            <Text style={styles.controlsTipLine}>⚡ Tap in the green zone for PERFECT bonus!</Text>
             <Text style={styles.controlsTipLine}>⏱ Faster taps mean bigger combo chains and score bonuses</Text>
             <Text style={styles.controlsTipLine}>💀 Three misses ends the run, so keep the rhythm</Text>
+            {activeDailyChallenge?.mode === 'hackey' && (
+              <Text style={styles.controlsTipLine}>🤸 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+            )}
           </View>
         )}
 
@@ -1483,6 +2458,10 @@ export default function App() {
         <Text style={styles.skyHudText}>Gates: {skyGatesCleared}</Text>
       </View>
 
+      {lastGatePerfect && (
+        <Text style={styles.skyPerfectFlash}>🎯 PERFECT THREAD!</Text>
+      )}
+
       <Text style={styles.skyHint}>Drag ← → to steer  •  Thread the gates  •  Dodge clouds</Text>
 
       {/* Controls tutorial */}
@@ -1492,6 +2471,9 @@ export default function App() {
           <Text style={styles.controlsTipLine}>← → Drag to steer your body through the air</Text>
           <Text style={styles.controlsTipLine}>🎯 Thread through ring gates for +25 pts each</Text>
           <Text style={styles.controlsTipLine}>☁ Dodge white turbulence clouds!</Text>
+          {activeDailyChallenge?.mode === 'skydive' && (
+            <Text style={styles.controlsTipLine}>🪂 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+          )}
           <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
         </View>
       )}
@@ -1566,15 +2548,29 @@ export default function App() {
       <View style={styles.raceHud}>
         <Text style={styles.raceHudText}>Speed: {(racerSpeed * 10000).toFixed(0)} km/h</Text>
       </View>
-      <Text style={styles.raceHint}>Drag ← → to steer  •  Hit boosts  •  Dodge rivals</Text>
+      {/* Slipstream charge indicator */}
+      {slipstreamTicks > 0 && !slipstreamActive && (
+        <View style={styles.slipstreamBar}>
+          <View style={[styles.slipstreamFill, { width: `${(slipstreamTicks / BOXRACE.SLIPSTREAM_TICKS) * 100}%` as `${number}%` }]} />
+          <Text style={styles.slipstreamLabel}>💨 Slipstream</Text>
+        </View>
+      )}
+      {slipstreamActive && (
+        <Text style={styles.slipstreamActiveText}>💨 SLIPSTREAM!</Text>
+      )}
+      <Text style={styles.raceHint}>Drag ← → to steer  •  Hit boosts  •  Stay behind rivals!</Text>
 
       {/* Controls tutorial */}
       {showControlsTip && (
         <View style={styles.controlsTipOverlay}>
           <Text style={styles.controlsTipTitle}>📦 Box Racer Controls</Text>
           <Text style={styles.controlsTipLine}>← → Drag to steer your box car</Text>
-          <Text style={styles.controlsTipLine}>⚡ Drive over green boost pads for +30 pts</Text>
+          <Text style={styles.controlsTipLine}>⚡ Drive over green boost pads for +{BOXRACE.BOOST_SCORE} pts</Text>
+          <Text style={styles.controlsTipLine}>💨 Stay behind rivals to charge SLIPSTREAM!</Text>
           <Text style={styles.controlsTipLine}>💥 Dodge coloured rival boxes — shields absorb crashes!</Text>
+          {activeDailyChallenge?.mode === 'boxrace' && (
+            <Text style={styles.controlsTipLine}>📦 Daily: {activeDailyChallenge.modifierName} • {activeDailyChallenge.objectiveText}</Text>
+          )}
           <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
         </View>
       )}
@@ -1583,29 +2579,109 @@ export default function App() {
     </View>
   );
 
-  const renderGameOver = () => (
-    <View style={styles.gameOverOverlay}>
-      <Text style={styles.gameOverTitle}>Run Over</Text>
-      <Text style={styles.gameOverScore}>{score}</Text>
-      <Text style={styles.gameOverLabel}>score</Text>
-      <Text style={styles.gameOverBest}>Best: {bestScores[selectedMode]}</Text>
-      {message ? <Text style={styles.gameOverMsg}>{message}</Text> : null}
-      <Pressable
-        onPress={restartGame}
-        style={[styles.gameOverBtn, { backgroundColor: activeMode.accentColor }]}
-      >
-        <Text style={styles.gameOverBtnText}>Play Again</Text>
-      </Pressable>
-      <Pressable onPress={() => setScreen('select')} style={styles.gameOverSecondary}>
-        <Text style={styles.gameOverSecondaryText}>Change Sport</Text>
-      </Pressable>
-      {rewardLoaded && (
-        <Pressable onPress={watchRewardAd} style={styles.gameOverAdBtn}>
-          <Text style={styles.gameOverAdText}>🎬 Watch Ad for Bonus</Text>
+  const renderGameOver = () => {
+    const isNewBest = score > runStartBestRef.current && score > 0;
+    const mastery = modeProgress[selectedMode];
+    const masteryLevel = getMasteryLevel(mastery.points);
+    const nextTier = getNextMasteryTier(mastery.points);
+    return (
+      <View style={styles.gameOverOverlay}>
+        <Text style={styles.gameOverTitle}>Run Over</Text>
+        <Text style={[styles.gameOverScore, isNewBest && { color: '#FFD700' }]}>{score}</Text>
+        <Text style={styles.gameOverLabel}>{isNewBest ? '🏆 NEW BEST!' : 'score'}</Text>
+        <Text style={styles.gameOverBest}>Best delta: {runEndMeta ? (runEndMeta.bestDelta >= 0 ? `+${runEndMeta.bestDelta}` : `${runEndMeta.bestDelta}`) : 0}</Text>
+        {/* Stage reached */}
+        <View style={[styles.gameOverSummaryRow, { marginTop: 10 }]}>
+          <Text style={styles.gameOverSummaryLabel}>Stage reached</Text>
+          <Text style={[styles.gameOverSummaryValue, { color: diffStage === 3 ? '#FF6B6B' : diffStage === 2 ? '#FFD700' : '#7ED8A0' }]}>
+            {diffStage === 3 ? '🔥 Expert' : diffStage === 2 ? '⚡ Pro' : '🌱 Rookie'}
+          </Text>
+        </View>
+        {/* Mode-specific run summary */}
+        {selectedMode === 'hackey' && runSummary.maxCombo !== undefined && (
+          <View style={styles.gameOverSummaryRow}>
+            <Text style={styles.gameOverSummaryLabel}>Max combo</Text>
+            <Text style={styles.gameOverSummaryValue}>x{runSummary.maxCombo}</Text>
+          </View>
+        )}
+        {selectedMode === 'skydive' && runSummary.gatesCleared !== undefined && (
+          <View style={styles.gameOverSummaryRow}>
+            <Text style={styles.gameOverSummaryLabel}>Gates cleared</Text>
+            <Text style={styles.gameOverSummaryValue}>{runSummary.gatesCleared}</Text>
+          </View>
+        )}
+        {selectedMode === 'surf' && runSummary.barrelRides !== undefined && (
+          <View style={styles.gameOverSummaryRow}>
+            <Text style={styles.gameOverSummaryLabel}>Barrels ridden</Text>
+            <Text style={styles.gameOverSummaryValue}>{runSummary.barrelRides}</Text>
+          </View>
+        )}
+        {selectedMode === 'skate' && runSummary.styleBonuses !== undefined && (
+          <View style={styles.gameOverSummaryRow}>
+            <Text style={styles.gameOverSummaryLabel}>Style bonuses</Text>
+            <Text style={styles.gameOverSummaryValue}>{runSummary.styleBonuses}</Text>
+          </View>
+        )}
+        {selectedMode === 'boxrace' && runSummary.slipstreams !== undefined && (
+          <View style={styles.gameOverSummaryRow}>
+            <Text style={styles.gameOverSummaryLabel}>Slipstreams</Text>
+            <Text style={styles.gameOverSummaryValue}>{runSummary.slipstreams}</Text>
+          </View>
+        )}
+        {runEndMeta && (
+          <>
+            <View style={styles.gameOverSummaryRow}>
+              <Text style={styles.gameOverSummaryLabel}>Run tokens</Text>
+              <Text style={styles.gameOverSummaryValue}>+{runEndMeta.payoutTokens}</Text>
+            </View>
+            <View style={styles.gameOverSummaryRow}>
+              <Text style={styles.gameOverSummaryLabel}>Mastery</Text>
+              <Text style={styles.gameOverSummaryValue}>
+                {MODE_MASTERIES[selectedMode][masteryLevel]} • +{runEndMeta.masteryPointsGained} pts
+              </Text>
+            </View>
+            {activeDailyChallenge && (
+              <View style={styles.gameOverChallengeWrap}>
+                <Text style={styles.gameOverChallengeTitle}>
+                  {activeDailyChallenge.badge} Daily • {activeDailyChallenge.modifierName}
+                </Text>
+                <Text style={styles.gameOverChallengeText}>
+                  {activeDailyChallenge.objectiveText} ({Math.min(runEndMeta.objectiveProgress, runEndMeta.objectiveTarget)}/{runEndMeta.objectiveTarget})
+                </Text>
+                <Text style={styles.gameOverChallengeText}>
+                  {runEndMeta.challengeCompleted
+                    ? runEndMeta.challengeTokens > 0
+                      ? `Cleared for +${runEndMeta.challengeTokens} bonus tokens`
+                      : 'Cleared again — reward already claimed today'
+                    : 'Replay CTA: run it back and finish the daily objective'}
+                </Text>
+              </View>
+            )}
+            <Text style={styles.gameOverReplayText}>
+              {nextTier
+                ? `Next mastery unlock at ${nextTier.points} pts: ${nextTier.rewardText}`
+                : 'All mastery tiers unlocked — chase a higher best and faster daily clears.'}
+            </Text>
+          </>
+        )}
+        {message ? <Text style={styles.gameOverMsg}>{message}</Text> : null}
+        <Pressable
+          onPress={restartGame}
+          style={[styles.gameOverBtn, { backgroundColor: activeMode.accentColor }]}
+        >
+          <Text style={styles.gameOverBtnText}>{activeDailyChallenge ? 'Replay This Challenge' : 'Play Again'}</Text>
         </Pressable>
-      )}
-    </View>
-  );
+        <Pressable onPress={() => setScreen('select')} style={styles.gameOverSecondary}>
+          <Text style={styles.gameOverSecondaryText}>Change Sport</Text>
+        </Pressable>
+        {rewardLoaded && (
+          <Pressable onPress={watchRewardAd} style={styles.gameOverAdBtn}>
+            <Text style={styles.gameOverAdText}>🎬 Watch Ad for Bonus</Text>
+          </Pressable>
+        )}
+      </View>
+    );
+  };
 
   // ══════════════════════════════════════════════════════════════════════════
   //  MAIN RENDER
@@ -1814,14 +2890,17 @@ export default function App() {
 
             {(Object.keys(GAME_MODES) as GameModeKey[]).map((key) => {
               const mode = GAME_MODES[key];
+              const progress = modeProgress[key];
+              const level = getMasteryLevel(progress.points);
+              const nextTier = getNextMasteryTier(progress.points);
+              const daily = dailyChallenges[key];
+              const dailyCleared = progress.dailyCompletedDate === dayKey;
               return (
-                <Pressable
+                <View
                   key={key}
-                  onPress={() => startGame(key)}
-                  style={({ pressed }) => [
+                  style={[
                     styles.modeCard,
                     { borderColor: mode.accentColor, backgroundColor: mode.dimColor },
-                    pressed && styles.pressed,
                   ]}
                 >
                   <View style={[styles.modeCardBackdrop, { backgroundColor: mode.accentColor + '18' }]} />
@@ -1848,12 +2927,46 @@ export default function App() {
                   <View style={styles.modeCardScene}>
                     <View style={[styles.modeSceneOrb, { backgroundColor: mode.accentColor }]} />
                     <View style={[styles.modeSceneLine, { backgroundColor: mode.accentColor + '88' }]} />
-                    <Text style={styles.modeSceneCopy}>{activeCharacter.persona}</Text>
+                    <Text style={styles.modeSceneCopy}>{MODE_MASTERIES[key][level]}</Text>
+                    <Text style={styles.modeSceneSub}>
+                      Mastery {progress.points} pts
+                      {nextTier ? ` • Next at ${nextTier.points}` : ' • Max tier'}
+                    </Text>
                   </View>
-                  <View style={[styles.startPill, { backgroundColor: mode.accentColor }]}>
-                    <Text style={styles.startPillText}>TAP TO PLAY</Text>
+                  <View style={styles.dailyCard}>
+                    <Text style={[styles.dailyCardTitle, { color: mode.accentColor }]}>
+                      {daily.badge} Daily: {daily.modifierName}
+                    </Text>
+                    <Text style={styles.dailyCardText}>{daily.objectiveText}</Text>
+                    <Text style={styles.dailyCardSub}>
+                      {daily.modifierText} • Reward {daily.rewardTokens + (level >= 3 ? 10 : 0)} tokens
+                    </Text>
                   </View>
-                </Pressable>
+                  <View style={styles.modeActionRow}>
+                    <Pressable
+                      onPress={() => startGame(key)}
+                      style={({ pressed }) => [
+                        styles.startPill,
+                        styles.modeActionBtn,
+                        { backgroundColor: mode.accentColor },
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.startPillText}>Normal Run</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => startGame(key, true)}
+                      style={({ pressed }) => [
+                        styles.modeActionBtn,
+                        styles.dailyStartBtn,
+                        dailyCleared && styles.dailyStartBtnDone,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.dailyStartBtnText}>{dailyCleared ? 'Daily Cleared' : 'Play Daily'}</Text>
+                    </Pressable>
+                  </View>
+                </View>
               );
             })}
           </ScrollView>
@@ -1922,6 +3035,29 @@ export default function App() {
           {selectedMode === 'hackey' && renderHackeyGame()}
           {selectedMode === 'skydive' && renderSkydiveGame()}
           {selectedMode === 'boxrace' && renderBoxRaceGame()}
+          {isPlaying && renderChallengeBanner()}
+
+          {/* Hit flash overlay */}
+          {hitFlash && (
+            <View
+              style={styles.hitFlashOverlay}
+              pointerEvents="none"
+            />
+          )}
+
+          {/* Milestone toast */}
+          {milestoneMsg ? (
+            <View style={styles.milestoneToast} pointerEvents="none">
+              <Text style={styles.milestoneToastText}>{milestoneMsg}</Text>
+            </View>
+          ) : null}
+
+          {/* Difficulty stage badge */}
+          {isPlaying && diffStage > 1 && (
+            <View style={[styles.stageBadge, { backgroundColor: diffStage === 3 ? '#FF3333' : '#FFB830' }]} pointerEvents="none">
+              <Text style={styles.stageBadgeText}>{diffStage === 3 ? '🔥 EXPERT' : '⚡ PRO'}</Text>
+            </View>
+          )}
 
           {/* In-game message strip */}
           {isPlaying && message ? (
@@ -2076,8 +3212,35 @@ const styles = StyleSheet.create({
   modeSceneOrb: { width: 42, height: 42, borderRadius: 21, opacity: 0.8 },
   modeSceneLine: { height: 5, borderRadius: 999, width: '55%' },
   modeSceneCopy: { color: '#A9C5DD', fontSize: 12, fontWeight: '600' },
+  modeSceneSub: { color: '#6E97BB', fontSize: 11, fontWeight: '600' },
+  dailyCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1D3B57',
+    padding: 12,
+    backgroundColor: '#081523CC',
+    gap: 4,
+  },
+  dailyCardTitle: { fontWeight: '800', fontSize: 13 },
+  dailyCardText: { color: '#D3E8FA', fontSize: 13, fontWeight: '700' },
+  dailyCardSub: { color: '#6E97BB', fontSize: 11, lineHeight: 16 },
+  modeActionRow: { flexDirection: 'row', gap: 10 },
+  modeActionBtn: { flex: 1 },
   startPill: { borderRadius: 8, paddingVertical: 10, alignItems: 'center' },
   startPillText: { color: '#06111E', fontWeight: '800', fontSize: 13, letterSpacing: 1 },
+  dailyStartBtn: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#35506B',
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#0B1927',
+  },
+  dailyStartBtnDone: {
+    backgroundColor: '#12311D',
+    borderColor: '#2E7048',
+  },
+  dailyStartBtnText: { color: '#CFE8FF', fontWeight: '800', fontSize: 13, letterSpacing: 0.5 },
 
   // ── HUD ───────────────────────────────────────────────────────────────────
   gameHud: {
@@ -2484,6 +3647,19 @@ const styles = StyleSheet.create({
   gameOverSecondaryText: { color: '#7FB4D8', fontWeight: '700', fontSize: 15 },
   gameOverAdBtn: { paddingVertical: 10, alignItems: 'center' },
   gameOverAdText: { color: '#7ED8A0', fontWeight: '700', fontSize: 14 },
+  gameOverChallengeWrap: {
+    width: '86%',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#264766',
+    backgroundColor: '#0B1B2BCC',
+    padding: 12,
+    gap: 4,
+    marginTop: 8,
+  },
+  gameOverChallengeTitle: { color: '#E6F4FF', fontWeight: '800', fontSize: 13 },
+  gameOverChallengeText: { color: '#9AC2DF', fontSize: 12, lineHeight: 17 },
+  gameOverReplayText: { color: '#7FA8C7', fontSize: 12, textAlign: 'center', marginTop: 8, marginBottom: 4 },
 
   // ── In-game message ────────────────────────────────────────────────────────
   inGameMsg: { paddingVertical: 8, paddingHorizontal: 16, alignItems: 'center' },
@@ -3068,4 +4244,155 @@ const styles = StyleSheet.create({
   },
   sensBtn: { color: '#CFE8FF', fontWeight: '800', fontSize: 16 },
   sensLabel: { color: '#6E97BB', fontWeight: '700', fontSize: 12, flex: 1, textAlign: 'center' },
+
+  // ── New: Hit flash, milestone, stage badge ────────────────────────────────
+  hitFlashOverlay: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#FF000044',
+    zIndex: 50,
+  },
+  milestoneToast: {
+    position: 'absolute',
+    top: '8%',
+    alignSelf: 'center',
+    backgroundColor: '#FFD70022',
+    borderWidth: 1,
+    borderColor: '#FFD700',
+    borderRadius: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 18,
+    zIndex: 60,
+  },
+  milestoneToastText: { color: '#FFD700', fontWeight: '800', fontSize: 15 },
+  stageBadge: {
+    position: 'absolute',
+    top: '3%',
+    right: '3%',
+    borderRadius: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    zIndex: 55,
+  },
+  stageBadgeText: { color: '#06111E', fontWeight: '900', fontSize: 11, letterSpacing: 0.5 },
+
+  // ── New: Barrel charge ────────────────────────────────────────────────────
+  barrelChargeBar: {
+    height: 6,
+    width: 100,
+    backgroundColor: '#1A3050',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginTop: 4,
+  },
+  barrelChargeFill: {
+    height: '100%',
+    backgroundColor: '#FFD700',
+    borderRadius: 4,
+  },
+
+  // ── New: Style Meter ──────────────────────────────────────────────────────
+  styleMeterWrap: {
+    position: 'absolute',
+    bottom: '14%',
+    alignSelf: 'center',
+    alignItems: 'center',
+    gap: 4,
+    zIndex: 40,
+  },
+  styleMeterLabel: { color: '#E6FFCC', fontWeight: '700', fontSize: 13 },
+  styleMeterBar: {
+    width: 140,
+    height: 8,
+    backgroundColor: '#1A2E1A',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  styleMeterFill: { height: '100%', borderRadius: 4 },
+
+  // ── New: Hackey perfect ───────────────────────────────────────────────────
+  hackeyPerfectMarker: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 2,
+    backgroundColor: '#A0FF80',
+  },
+  hackeyPerfectLabel: {
+    textAlign: 'center',
+    color: '#A0FF80',
+    fontWeight: '700',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  hackeyPerfectFlash: {
+    position: 'absolute',
+    top: '40%',
+    alignSelf: 'center',
+    color: '#FFD700',
+    fontWeight: '900',
+    fontSize: 28,
+    zIndex: 60,
+  },
+
+  // ── New: Sky perfect flash ────────────────────────────────────────────────
+  skyPerfectFlash: {
+    position: 'absolute',
+    top: '62%',
+    alignSelf: 'center',
+    color: '#00FFD0',
+    fontWeight: '900',
+    fontSize: 22,
+    zIndex: 60,
+  },
+
+  // ── New: Slipstream ───────────────────────────────────────────────────────
+  slipstreamBar: {
+    position: 'absolute',
+    bottom: '18%',
+    alignSelf: 'center',
+    width: 140,
+    height: 12,
+    backgroundColor: '#1A2030',
+    borderRadius: 6,
+    overflow: 'hidden',
+    zIndex: 40,
+  },
+  slipstreamFill: { height: '100%', backgroundColor: '#56B0FF', borderRadius: 6 },
+  slipstreamLabel: { position: 'absolute', top: -14, alignSelf: 'center', color: '#56B0FF', fontSize: 11, fontWeight: '700' },
+  slipstreamActiveText: {
+    position: 'absolute',
+    bottom: '22%',
+    alignSelf: 'center',
+    color: '#56B0FF',
+    fontWeight: '900',
+    fontSize: 22,
+    zIndex: 60,
+  },
+
+  // ── New: Game-over summary ────────────────────────────────────────────────
+  gameOverSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '80%',
+    paddingVertical: 2,
+  },
+  gameOverSummaryLabel: { color: '#6E97BB', fontSize: 13, fontWeight: '600' },
+  gameOverSummaryValue: { color: '#E6F4FF', fontSize: 13, fontWeight: '700' },
+  challengeBanner: {
+    position: 'absolute',
+    top: '10%',
+    left: '4%',
+    right: '4%',
+    borderRadius: 14,
+    backgroundColor: '#081523EE',
+    borderWidth: 1,
+    borderColor: '#2A4560',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    gap: 3,
+    zIndex: 45,
+  },
+  challengeBannerTitle: { color: '#E6F4FF', fontWeight: '800', fontSize: 13 },
+  challengeBannerText: { color: '#A9C5DD', fontSize: 12, lineHeight: 17 },
+  challengeBannerObjective: { color: '#FFD700', fontWeight: '700', fontSize: 12 },
 });
