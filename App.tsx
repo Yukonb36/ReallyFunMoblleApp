@@ -221,6 +221,12 @@ export default function App() {
   const [message, setMessage] = useState('');
   const [showCharacters, setShowCharacters] = useState(false);
 
+  // ── Sensitivity & controls tutorial ───────────────────────────────────────
+  const [sensitivity, setSensitivity] = useState(1.0);
+  const sensitivityRef = useRef(1.0);
+  const [showControlsTip, setShowControlsTip] = useState(false);
+  const controlsTipTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // ── refs ──────────────────────────────────────────────────────────────────
   const tickRef = useRef(0);
   const rewardedAtGameOverRef = useRef(false);
@@ -366,6 +372,7 @@ export default function App() {
   useEffect(() => { hackeyMissesRef.current = hackeyMisses; }, [hackeyMisses]);
   useEffect(() => { skyXRef.current = skyX; }, [skyX]);
   useEffect(() => { racerXRef.current = racerX; }, [racerX]);
+  useEffect(() => { sensitivityRef.current = sensitivity; }, [sensitivity]);
   // ══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'surf') return;
@@ -828,6 +835,9 @@ export default function App() {
     setIsPlaying(true);
     isPlayingRef.current = true;
     setScreen('game');
+    if (controlsTipTimeoutRef.current) clearTimeout(controlsTipTimeoutRef.current);
+    setShowControlsTip(true);
+    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), 4500);
   }, [resetGameState, activeCharacter.shieldBonus]);
 
   const restartGame = useCallback(() => {
@@ -835,6 +845,9 @@ export default function App() {
     setShields(activeCharacter.shieldBonus);
     setIsPlaying(true);
     isPlayingRef.current = true;
+    if (controlsTipTimeoutRef.current) clearTimeout(controlsTipTimeoutRef.current);
+    setShowControlsTip(true);
+    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), 4500);
   }, [resetGameState, selectedMode, activeCharacter.shieldBonus]);
 
   // ─── Surf: PanResponder ───────────────────────────────────────────────────
@@ -849,7 +862,7 @@ export default function App() {
       const dragX = applyGestureDeadzone(gs.dx);
       const newX = clamp(
         surfDragOriginRef.current
-          + dragX / SCREEN_W * Math.max(0.36, SURF_DRAG_SENSITIVITY - activeCharacter.controlBonus),
+          + dragX / SCREEN_W * Math.max(0.36, SURF_DRAG_SENSITIVITY - activeCharacter.controlBonus) * sensitivityRef.current,
         0.05,
         0.95,
       );
@@ -885,7 +898,7 @@ export default function App() {
         // Pump: swipe left/right gives angular velocity
         const dragX = applyGestureDeadzone(gs.dx);
         if (dragX === 0) return;
-        const push = -dragX / SCREEN_W * Math.max(0.1, SKATE_PUMP_SENSITIVITY - activeCharacter.controlBonus * 0.35);
+        const push = -dragX / SCREEN_W * Math.max(0.1, SKATE_PUMP_SENSITIVITY - activeCharacter.controlBonus * 0.35) * sensitivityRef.current;
         skateSpeedRef.current = clamp(skateSpeedRef.current + push, -0.12, 0.12);
         setSkateSpeed(skateSpeedRef.current);
       }
@@ -904,7 +917,7 @@ export default function App() {
       const dragX = applyGestureDeadzone(gs.dx);
       const newX = clamp(
         skyDragOriginRef.current
-          + dragX / SCREEN_W * Math.max(0.1, SKY_DRAG_SENSITIVITY - activeCharacter.controlBonus * 0.5),
+          + dragX / SCREEN_W * Math.max(0.1, SKY_DRAG_SENSITIVITY - activeCharacter.controlBonus * 0.5) * sensitivityRef.current,
         0.05,
         0.95,
       );
@@ -925,7 +938,7 @@ export default function App() {
       const dragX = applyGestureDeadzone(gs.dx);
       const newX = clamp(
         raceDragOriginRef.current
-          + dragX / SCREEN_W * Math.max(0.12, BOX_DRAG_SENSITIVITY - activeCharacter.controlBonus * 0.45),
+          + dragX / SCREEN_W * Math.max(0.12, BOX_DRAG_SENSITIVITY - activeCharacter.controlBonus * 0.45) * sensitivityRef.current,
         0.08,
         0.92,
       );
@@ -1134,6 +1147,41 @@ export default function App() {
           />
         ))}
 
+        {/* Wave shoulder — the unbroken face rolling ahead of the rider */}
+        <View
+          style={[
+            styles.waveShoulder,
+            {
+              top: `${waveY - 20}%` as `${number}%`,
+              left: `${Math.min(surferX * 100 + 20, 65)}%` as `${number}%`,
+            },
+          ]}
+        />
+        {/* Wave lip / breaking curl — forms above and forward of the rider */}
+        <View
+          style={[
+            styles.waveLip,
+            {
+              top: `${waveY - 13}%` as `${number}%`,
+              left: `${Math.max(surferX * 100 - 22, 3)}%` as `${number}%`,
+            },
+          ]}
+        />
+        {/* Surfboard — elongated shape beneath the rider */}
+        <View
+          style={[
+            styles.gameSurfboard,
+            {
+              left: `${surferX * 100 - 12}%` as `${number}%`,
+              top: `${waveY - 12}%` as `${number}%`,
+              transform: trickAirborne
+                ? [{ rotate: '22deg' }, { scaleX: 1.08 }]
+                : [{ rotate: '-3deg' }],
+              backgroundColor: trickAirborne ? '#FFD46A' : '#F06A1C',
+            },
+          ]}
+        />
+
         {renderActionCharacter(
           'surf',
           {
@@ -1154,6 +1202,18 @@ export default function App() {
           )}
           {trickAirborne && <Text style={styles.trickLabel}>✈️ AERIAL!</Text>}
         </View>
+
+        {/* Controls tutorial — auto-hides after 4.5 s */}
+        {showControlsTip && (
+          <View style={styles.controlsTipOverlay}>
+            <Text style={styles.controlsTipTitle}>🌊 Surf Controls</Text>
+            <Text style={styles.controlsTipLine}>← → Drag to steer along the wave face</Text>
+            <Text style={styles.controlsTipLine}>⬆ Flick UP quickly to launch an aerial (+80 pts)</Text>
+            <Text style={styles.controlsTipLine}>⭐ Centre zone = 2× score multiplier</Text>
+            <Text style={styles.controlsTipLine}>⚠ Dodge the whitewater closeout sections!</Text>
+            <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
+          </View>
+        )}
 
         {!isPlaying && renderGameOver()}
       </View>
@@ -1185,6 +1245,13 @@ export default function App() {
         <View style={[styles.coping, { left: '8%' }]} />
         <View style={[styles.coping, { right: '8%' }]} />
 
+        {/* Deck platforms at the top of each wall */}
+        <View style={[styles.pipeDeck, { left: 0 }]} />
+        <View style={[styles.pipeDeck, { right: 0 }]} />
+        {/* Quarter-pipe transition curves */}
+        <View style={styles.pipeTransitionLeft} />
+        <View style={styles.pipeTransitionRight} />
+
         {/* Rails */}
         {skateRails.map((rail) => (
           <View
@@ -1196,6 +1263,23 @@ export default function App() {
             ]}
           />
         ))}
+
+        {/* Skateboard deck with four wheels */}
+        <View
+          style={[
+            styles.skateboardDeck,
+            {
+              left: `${skaterX - 7}%` as `${number}%`,
+              top: `${airY + 1}%` as `${number}%`,
+              transform: [{ rotate: `${skateAngle * 45}deg` }],
+            },
+          ]}
+        >
+          <View style={[styles.skateboardWheelG, { left: 5 }]} />
+          <View style={[styles.skateboardWheelG, { left: 17 }]} />
+          <View style={[styles.skateboardWheelG, { right: 5 }]} />
+          <View style={[styles.skateboardWheelG, { right: 17 }]} />
+        </View>
 
         {renderActionCharacter('skate', activeCharacter, {
           left: `${skaterX - 6}%` as `${number}%`,
@@ -1212,7 +1296,19 @@ export default function App() {
         )}
 
         {/* Hint */}
-        <Text style={styles.skateHint}>Swipe ← → to pump</Text>
+        <Text style={styles.skateHint}>Swipe ← → to pump  •  Airborne? Tap to score!</Text>
+
+        {/* Controls tutorial */}
+        {showControlsTip && (
+          <View style={styles.controlsTipOverlay}>
+            <Text style={styles.controlsTipTitle}>🛹 Half Pipe Controls</Text>
+            <Text style={styles.controlsTipLine}>← → Swipe left or right to pump up the walls</Text>
+            <Text style={styles.controlsTipLine}>🚀 Build speed to launch off the coping</Text>
+            <Text style={styles.controlsTipLine}>✈ When airborne → TAP the screen to score</Text>
+            <Text style={styles.controlsTipLine}>🏅 Land cleanly for bonus points!</Text>
+            <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
+          </View>
+        )}
 
         {!isPlaying && renderGameOver()}
       </View>
@@ -1356,7 +1452,18 @@ export default function App() {
         <Text style={styles.skyHudText}>Gates: {skyGatesCleared}</Text>
       </View>
 
-      <Text style={styles.skyHint}>Drag to steer</Text>
+      <Text style={styles.skyHint}>Drag ← → to steer  •  Thread the gates  •  Dodge clouds</Text>
+
+      {/* Controls tutorial */}
+      {showControlsTip && (
+        <View style={styles.controlsTipOverlay}>
+          <Text style={styles.controlsTipTitle}>🪂 Skydive Controls</Text>
+          <Text style={styles.controlsTipLine}>← → Drag to steer your body through the air</Text>
+          <Text style={styles.controlsTipLine}>🎯 Thread through ring gates for +25 pts each</Text>
+          <Text style={styles.controlsTipLine}>☁ Dodge white turbulence clouds!</Text>
+          <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
+        </View>
+      )}
 
       {!isPlaying && renderGameOver()}
     </View>
@@ -1420,7 +1527,18 @@ export default function App() {
         })}
       </View>
 
-      <Text style={styles.raceHint}>Drag to steer</Text>
+      <Text style={styles.raceHint}>Drag ← → to steer  •  Hit boosts  •  Dodge rivals</Text>
+
+      {/* Controls tutorial */}
+      {showControlsTip && (
+        <View style={styles.controlsTipOverlay}>
+          <Text style={styles.controlsTipTitle}>📦 Box Racer Controls</Text>
+          <Text style={styles.controlsTipLine}>← → Drag to steer your box car</Text>
+          <Text style={styles.controlsTipLine}>⚡ Drive over green boost pads for +30 pts</Text>
+          <Text style={styles.controlsTipLine}>💥 Dodge coloured rival boxes — shields absorb crashes!</Text>
+          <Text style={styles.controlsTipDim}>Tap − / + in the HUD to adjust sensitivity</Text>
+        </View>
+      )}
 
       {!isPlaying && renderGameOver()}
     </View>
@@ -1732,6 +1850,31 @@ export default function App() {
                 <Text style={[styles.hudStat, { color: '#FFD700' }]}>⏱ {slowMotionSeconds}s</Text>
               )}
             </View>
+          </View>
+
+          {/* Sensitivity control row */}
+          <View style={[styles.sensHudRow, { borderBottomColor: activeMode.accentColor + '55' }]}>
+            <Pressable
+              onPress={() => {
+                const v = clamp(sensitivity - 0.25, 0.5, 2.0);
+                setSensitivity(v);
+                sensitivityRef.current = v;
+              }}
+              style={styles.sensBtnWrap}
+            >
+              <Text style={styles.sensBtn}>−</Text>
+            </Pressable>
+            <Text style={styles.sensLabel}>Sensitivity ×{sensitivity.toFixed(2)}</Text>
+            <Pressable
+              onPress={() => {
+                const v = clamp(sensitivity + 0.25, 0.5, 2.0);
+                setSensitivity(v);
+                sensitivityRef.current = v;
+              }}
+              style={styles.sensBtnWrap}
+            >
+              <Text style={styles.sensBtn}>+</Text>
+            </Pressable>
           </View>
 
           {/* Game content */}
@@ -2628,4 +2771,144 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 12,
   },
+
+  // ── Surf — wave & board enhancements ─────────────────────────────────────
+  waveShoulder: {
+    position: 'absolute',
+    width: 130,
+    height: 55,
+    borderTopLeftRadius: 65,
+    borderTopRightRadius: 90,
+    backgroundColor: '#0B5F9C',
+    opacity: 0.72,
+  },
+  waveLip: {
+    position: 'absolute',
+    width: 70,
+    height: 26,
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 14,
+    borderBottomLeftRadius: 6,
+    backgroundColor: '#4DD0FF',
+    opacity: 0.65,
+    transform: [{ rotate: '-8deg' }],
+  },
+  gameSurfboard: {
+    position: 'absolute',
+    width: 82,
+    height: 13,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#FFBE7A88',
+    opacity: 0.97,
+  },
+
+  // ── Skate — board & half-pipe enhancements ────────────────────────────────
+  skateboardDeck: {
+    position: 'absolute',
+    width: 56,
+    height: 11,
+    borderRadius: 6,
+    backgroundColor: '#D45A10',
+    borderWidth: 1,
+    borderColor: '#FF9A44',
+    overflow: 'visible',
+  },
+  skateboardWheelG: {
+    position: 'absolute',
+    bottom: -6,
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#1A1A1A',
+    borderWidth: 1,
+    borderColor: '#888888',
+  },
+  pipeDeck: {
+    position: 'absolute',
+    top: '20%',
+    width: '10%',
+    height: '2%',
+    backgroundColor: '#5C3D1A',
+    borderBottomWidth: 2,
+    borderColor: '#8B5C2A',
+  },
+  pipeTransitionLeft: {
+    position: 'absolute',
+    left: '9%',
+    top: '55%',
+    width: '7%',
+    height: '20%',
+    borderTopRightRadius: 80,
+    backgroundColor: '#1A0F07',
+    borderRightWidth: 2,
+    borderColor: '#5C3010',
+  },
+  pipeTransitionRight: {
+    position: 'absolute',
+    right: '9%',
+    top: '55%',
+    width: '7%',
+    height: '20%',
+    borderTopLeftRadius: 80,
+    backgroundColor: '#1A0F07',
+    borderLeftWidth: 2,
+    borderColor: '#5C3010',
+  },
+
+  // ── Controls tutorial overlay ──────────────────────────────────────────────
+  controlsTipOverlay: {
+    position: 'absolute',
+    bottom: '14%',
+    left: '4%',
+    right: '4%',
+    backgroundColor: 'rgba(6,12,22,0.90)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#1E3D60',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    gap: 6,
+    zIndex: 20,
+  },
+  controlsTipTitle: {
+    color: '#E6F4FF',
+    fontWeight: '800',
+    fontSize: 15,
+    marginBottom: 2,
+  },
+  controlsTipLine: {
+    color: '#A8CDED',
+    fontWeight: '600',
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  controlsTipDim: {
+    color: '#4A7090',
+    fontWeight: '600',
+    fontSize: 11,
+    marginTop: 2,
+  },
+
+  // ── Sensitivity HUD row ────────────────────────────────────────────────────
+  sensHudRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    backgroundColor: '#0A1520',
+    gap: 12,
+  },
+  sensBtnWrap: {
+    width: 32,
+    height: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1A3050',
+    borderRadius: 6,
+  },
+  sensBtn: { color: '#CFE8FF', fontWeight: '800', fontSize: 16 },
+  sensLabel: { color: '#6E97BB', fontWeight: '700', fontSize: 12, flex: 1, textAlign: 'center' },
 });
