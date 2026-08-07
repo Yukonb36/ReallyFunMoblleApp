@@ -2427,7 +2427,7 @@ const styles = StyleSheet.create({
     borderWidth: 2, alignItems: 'center', justifyContent: 'center',
   },
   hackeyTargetPulse: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     borderRadius: 24,
     borderWidth: 2,
     borderColor: '#F8E4FF',
