@@ -347,11 +347,14 @@ const sumLevelRewards = (fromLevel: number, toLevel: number) => {
 };
 const getDailySeed = (dayKey: string) =>
   Array.from(dayKey).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+const hashSeed = (value: string) =>
+  Array.from(value).reduce((sum, char, index) => sum + char.charCodeAt(0) * (index + 17), 0);
 const buildDailyChallenge = (mode: GameModeKey, dayKey: string): DailyChallenge => {
   const modeIndex = MODE_ORDER.indexOf(mode);
-  const seed = getDailySeed(dayKey);
-  const modifier = DAILY_MODIFIERS[mode][(seed + modeIndex * 5) % DAILY_MODIFIERS[mode].length];
-  const objective = DAILY_OBJECTIVES[mode][(seed * 7 + modeIndex * 11) % DAILY_OBJECTIVES[mode].length];
+  const modifierSeed = hashSeed(`${dayKey}:${mode}:modifier`) + getDailySeed(dayKey) + modeIndex * 5;
+  const objectiveSeed = hashSeed(`${dayKey}:${mode}:objective`) + modeIndex * 11;
+  const modifier = DAILY_MODIFIERS[mode][modifierSeed % DAILY_MODIFIERS[mode].length];
+  const objective = DAILY_OBJECTIVES[mode][objectiveSeed % DAILY_OBJECTIVES[mode].length];
   return {
     dayKey,
     mode,
@@ -857,6 +860,7 @@ export default function App() {
         if (newHold >= SURF.BARREL_HOLD_TICKS) {
           barrelActiveRef.current = true;
           setBarrelActive(true);
+          runSummaryRef.current = { ...runSummaryRef.current, barrelRides: (runSummaryRef.current.barrelRides ?? 0) + 1 };
           setMessage('🛢 BARREL! 3× score for 3 seconds!');
           triggerAudioHook(AUDIO_HOOKS.surf.BARREL, 350);
           if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
@@ -867,7 +871,6 @@ export default function App() {
             barrelHoldTicksRef.current = 0;
             setBarrelHoldTicks(0);
             setMessage('');
-            runSummaryRef.current = { ...runSummaryRef.current, barrelRides: (runSummaryRef.current.barrelRides ?? 0) + 1 };
           }, SURF.BARREL_DURATION_TICKS * TICK_MS);
         }
       } else if (!inSweet && !barrelActiveRef.current) {
