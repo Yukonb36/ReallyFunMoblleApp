@@ -527,7 +527,7 @@ export default function App() {
         const sx = surferXRef.current;
         const hit = zones.find((z) => sx > z.x && sx < z.x + z.width);
         // Near-miss feedback
-        const nearMiss = !hit && zones.find((z) => Math.abs(sx - z.x) < 0.06 || Math.abs(sx - (z.x + z.width)) < 0.06);
+        const nearMiss = !hit && zones.find((z) => (Math.abs(sx - z.x) < 0.06 || Math.abs(sx - (z.x + z.width)) < 0.06));
         if (nearMiss && !reducedMotion) void Haptics.selectionAsync();
         if (hit && !trickAirborne) {
           if (shields > 0) {
@@ -824,7 +824,8 @@ export default function App() {
 
       const stage = diffStageRef.current;
       const GATE_GAP = (stage === 3 ? SKYDIVE.GATE_GAP_S3 : stage === 2 ? SKYDIVE.GATE_GAP_S2 : SKYDIVE.GATE_GAP_S1) + activeCharacter.controlBonus * 0.12;
-      const speed = slowMotionSeconds > 0 ? (SKYDIVE.SPEED_S1 * 0.5) : (stage === 3 ? SKYDIVE.SPEED_S3 : stage === 2 ? SKYDIVE.SPEED_S2 : SKYDIVE.SPEED_S1);
+      const stageSpeed = stage === 3 ? SKYDIVE.SPEED_S3 : stage === 2 ? SKYDIVE.SPEED_S2 : SKYDIVE.SPEED_S1;
+      const speed = stageSpeed * (slowMotionSeconds > 0 ? 0.5 : 1);
       const gateSpawn = stage === 3 ? SKYDIVE.GATE_SPAWN_S3 : stage === 2 ? SKYDIVE.GATE_SPAWN_S2 : SKYDIVE.GATE_SPAWN_S1;
       const cloudSpawn = stage === 3 ? SKYDIVE.CLOUD_SPAWN_S3 : stage === 2 ? SKYDIVE.CLOUD_SPAWN_S2 : SKYDIVE.CLOUD_SPAWN_S1;
 
@@ -995,8 +996,8 @@ export default function App() {
           if (newTicks >= BOXRACE.SLIPSTREAM_TICKS && !slipstreamActiveRef.current) {
             slipstreamActiveRef.current = true;
             setSlipstreamActive(true);
-            setScore((c) => c + 50);
-            setMessage('💨 SLIPSTREAM! +50 speed burst!');
+            setScore((c) => c + BOXRACE.SLIPSTREAM_SCORE);
+            setMessage(`💨 SLIPSTREAM! +${BOXRACE.SLIPSTREAM_SCORE} speed burst!`);
             runSummaryRef.current = { ...runSummaryRef.current, slipstreams: (runSummaryRef.current.slipstreams ?? 0) + 1 };
             if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
             setTimeout(() => {
@@ -2000,7 +2001,7 @@ export default function App() {
   );
 
   const renderGameOver = () => {
-    const isNewBest = score >= bestScores[selectedMode] && score > 0;
+    const isNewBest = score > bestScores[selectedMode] && score > 0;
     return (
       <View style={styles.gameOverOverlay}>
         <Text style={styles.gameOverTitle}>Run Over</Text>

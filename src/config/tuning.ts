@@ -93,6 +93,7 @@ export const BOXRACE = {
   MAX_SPEED: 0.025,
   SPEED_ACCEL: 0.0004,
   BOOST_SCORE: 30,
+  SLIPSTREAM_SCORE: 50,
   SLIPSTREAM_DIST: 0.08,  // x-dist to be "behind" a rival
   SLIPSTREAM_Y_RANGE: 0.12,
   SLIPSTREAM_TICKS: 30,   // ~1.5 s to activate slipstream
