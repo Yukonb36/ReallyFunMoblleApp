@@ -1,98 +1,108 @@
-# Final Scorecard — Round 2 Balancing + Game Feel
+# Final Scorecard — Round 3 Replayability + Progression
 
 Date: 2026-08-07  
-Scope: Gameplay Depth, Feedback/Game Feel, Mobile Usability
+Scope: Content Variety, Retention Hooks, Progression Value, Run-End Replay Loop
 
 ## Scoring rubric (0–10)
-- **Gameplay Depth**: pacing, stage structure, fairness, decision pressure
-- **Feedback/Game Feel**: confirmation, danger clarity, impact response, reinforcement
-- **Mobile Usability**: touch responsiveness, control clarity, fail-state fairness
+- **Replayability**: content variance, objectives, modifier freshness, reason to replay
+- **Progression Hooks**: unlock cadence, rewards, mastery clarity, repeat value
+- **Run-End Loop**: summary quality, delta feedback, replay prompt, next-goal clarity
 
 ---
 
 ## Surf Ride 🏄
 
-| Axis | Before (Round 2 start) | After (Round 2 end) | Δ |
+| Axis | Round 2 | Round 3 | Δ |
 |---|---:|---:|---:|
-| Gameplay Depth | 8.0 | 8.7 | +0.7 |
-| Feedback/Game Feel | 8.0 | 8.8 | +0.8 |
-| Mobile Usability | 8.0 | 8.6 | +0.6 |
+| Replayability | 8.7 | 9.2 | +0.5 |
+| Progression Hooks | 8.0 | 8.8 | +0.8 |
+| Run-End Loop | 8.2 | 9.0 | +0.8 |
 
 Evidence:
-- Stage pacing now 35s/75s thresholds with stage-based wave speed + spawn + width.
-- Near-miss threshold and hit cooldown reduce unfair chain fails.
-- Aerial/barrel/hit/stage/near-miss audio hooks plus tightened input deadzone.
-
----
+- Daily surf modifiers now rotate lane pressure and scoring focus.
+- Mastery titles + token tier rewards add replay value beyond one high score.
+- Run-end surf summary now shows best delta, token payout, mastery gain, and daily objective result.
 
 ## Half Pipe 🛹
 
-| Axis | Before (Round 2 start) | After (Round 2 end) | Δ |
+| Axis | Round 2 | Round 3 | Δ |
 |---|---:|---:|---:|
-| Gameplay Depth | 8.0 | 8.5 | +0.5 |
-| Feedback/Game Feel | 8.0 | 8.7 | +0.7 |
-| Mobile Usability | 8.0 | 8.5 | +0.5 |
+| Replayability | 8.5 | 9.0 | +0.5 |
+| Progression Hooks | 8.0 | 8.7 | +0.7 |
+| Run-End Loop | 8.1 | 8.9 | +0.8 |
 
 Evidence:
-- Smoother land windows and style timing reduce fail frustration.
-- Rail spawn density scales by stage for clearer progression.
-- Pump/air/trick/land/style event hooks improve action confirmation.
-
----
+- Low Gravity / Rail Jam / Trick Frenzy meaningfully change session feel.
+- Mastery tiers create clear short-term and mid-term replay goals.
+- Daily objectives push different success patterns than pure score chase.
 
 ## Hackey Circle 🤸
 
-| Axis | Before (Round 2 start) | After (Round 2 end) | Δ |
+| Axis | Round 2 | Round 3 | Δ |
 |---|---:|---:|---:|
-| Gameplay Depth | 9.0 | 9.2 | +0.2 |
-| Feedback/Game Feel | 9.0 | 9.3 | +0.3 |
-| Mobile Usability | 8.0 | 8.5 | +0.5 |
+| Replayability | 9.2 | 9.4 | +0.2 |
+| Progression Hooks | 8.1 | 8.8 | +0.7 |
+| Run-End Loop | 8.3 | 9.0 | +0.7 |
 
 Evidence:
-- Stage timing now explicit (not combo-only), improving run pacing consistency.
-- Drain curve flattened and danger window signaling added.
-- Faster sack interpolation plus tap-quality/combo-burst/miss hooks improve responsiveness.
-
----
+- Echo Target and Focus Ring create more daily rhythm variety.
+- Early mastery payouts improve retention in the first few sessions.
+- Daily completion feedback plus next mastery target sharpens the rerun loop.
 
 ## Skydive 🪂
 
-| Axis | Before (Round 2 start) | After (Round 2 end) | Δ |
+| Axis | Round 2 | Round 3 | Δ |
 |---|---:|---:|---:|
-| Gameplay Depth | 9.0 | 9.1 | +0.1 |
-| Feedback/Game Feel | 8.0 | 8.8 | +0.8 |
-| Mobile Usability | 8.0 | 8.5 | +0.5 |
+| Replayability | 9.1 | 9.3 | +0.2 |
+| Progression Hooks | 8.0 | 8.7 | +0.7 |
+| Run-End Loop | 8.2 | 8.9 | +0.7 |
 
 Evidence:
-- Gap/spawn/speed transitions softened while preserving 3-stage challenge.
-- Gate pass window now matches visual lane better.
-- Tight-gap danger signaling and clear/perfect/hit audio hooks added.
-
----
+- Jetstream / Ring Rush / Cloudburst produce visible route changes.
+- Mastery ladder now gives persistent rewards to gate specialists.
+- End-of-run summary now makes daily progress and next unlock obvious.
 
 ## Box Racer 📦
 
-| Axis | Before (Round 2 start) | After (Round 2 end) | Δ |
+| Axis | Round 2 | Round 3 | Δ |
 |---|---:|---:|---:|
-| Gameplay Depth | 8.0 | 8.6 | +0.6 |
-| Feedback/Game Feel | 8.0 | 8.7 | +0.7 |
-| Mobile Usability | 8.0 | 8.5 | +0.5 |
+| Replayability | 8.6 | 9.1 | +0.5 |
+| Progression Hooks | 8.0 | 8.8 | +0.8 |
+| Run-End Loop | 8.2 | 9.0 | +0.8 |
 
 Evidence:
-- Spawn/acceleration/slipstream timings smoothed for cleaner difficulty ramp.
-- Collision + pickup windows centralized and tuned for fairness.
-- Slipstream charge/burst, danger, boost, and hit hooks increase readability.
+- Sidewind / Boost Parade / Turbo Grid alter lane choice and pressure.
+- Sponsor-tier daily reward boosts create longer-term value without breaking run balance.
+- The game-over screen now gives a stronger return-to-play message than a bare score screen.
 
 ---
 
-## Round 2 summary
+## Round 3 summary
 
-| Game | Gameplay Depth | Feedback/Game Feel | Mobile Usability |
+| Game | Replayability | Progression Hooks | Run-End Loop |
 |---|---:|---:|---:|
-| Surf Ride | 8.7 | 8.8 | 8.6 |
-| Half Pipe | 8.5 | 8.7 | 8.5 |
-| Hackey Circle | 9.2 | 9.3 | 8.5 |
-| Skydive | 9.1 | 8.8 | 8.5 |
-| Box Racer | 8.6 | 8.7 | 8.5 |
+| Surf Ride | 9.2 | 8.8 | 9.0 |
+| Half Pipe | 9.0 | 8.7 | 8.9 |
+| Hackey Circle | 9.4 | 8.8 | 9.0 |
+| Skydive | 9.3 | 8.7 | 8.9 |
+| Box Racer | 9.1 | 8.8 | 9.0 |
 
-All playable games remain above 8/10 on requested axes.
+All playable games are now at or above 8/10 on the Round 3 replayability and progression criteria.
+
+---
+
+## Known Gaps + Next Patch Plan
+
+### P0
+- Add a visible landing-screen summary for **today's five daily challenges** so players can choose a session target before entering the select screen.
+- Add a **save migration/version field** so future balance or progression changes can safely evolve persistent data.
+
+### P1
+- Expand mastery rewards from titles/token drops into **mode-specific cosmetic scene swaps** on the select cards and game-over screens.
+- Add **streak tracking** for consecutive daily clears to strengthen week-over-week retention.
+- Add a **“nearly cleared” fail-state callout** when a player misses a daily target by one step.
+
+### P2
+- Add more modifier families per mode so the daily pool can rotate with less repetition over longer windows.
+- Split run-end analytics into a fuller personal-history screen with recent attempts, best trend, and challenge history.
+- Tune challenge reward values after live-session data to better match session length by game.

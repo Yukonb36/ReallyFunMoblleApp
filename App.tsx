@@ -811,12 +811,6 @@ export default function App() {
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
-      const challengeModifier = activeDailyChallengeRef.current?.mode === 'boxrace'
-        ? activeDailyChallengeRef.current.modifierId
-        : null;
-      const challengeModifier = activeDailyChallengeRef.current?.mode === 'hackey'
-        ? activeDailyChallengeRef.current.modifierId
-        : null;
       const surfModifier = activeDailyChallengeRef.current?.mode === 'surf'
         ? activeDailyChallengeRef.current.modifierId
         : null;
@@ -1130,6 +1124,9 @@ export default function App() {
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
+      const challengeModifier = activeDailyChallengeRef.current?.mode === 'hackey'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
 
       if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
@@ -1422,6 +1419,9 @@ export default function App() {
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
+      const challengeModifier = activeDailyChallengeRef.current?.mode === 'boxrace'
+        ? activeDailyChallengeRef.current.modifierId
+        : null;
 
       if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
