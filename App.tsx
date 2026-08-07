@@ -1564,7 +1564,7 @@ export default function App() {
       </View>
 
       <View style={styles.raceHud}>
-        <Text style={styles.raceHudText}>Speed: {(racerSpeed * 1000).toFixed(0)} km/h</Text>
+        <Text style={styles.raceHudText}>Speed: {(racerSpeed * 10000).toFixed(0)} km/h</Text>
       </View>
       <Text style={styles.raceHint}>Drag ← → to steer  •  Hit boosts  •  Dodge rivals</Text>
 
