@@ -351,7 +351,7 @@ const buildDailyChallenge = (mode: GameModeKey, dayKey: string): DailyChallenge 
   const modeIndex = MODE_ORDER.indexOf(mode);
   const seed = getDailySeed(dayKey);
   const modifier = DAILY_MODIFIERS[mode][(seed + modeIndex * 5) % DAILY_MODIFIERS[mode].length];
-  const objective = DAILY_OBJECTIVES[mode][(seed * 3 + modeIndex * 7) % DAILY_OBJECTIVES[mode].length];
+  const objective = DAILY_OBJECTIVES[mode][(seed * 7 + modeIndex * 11) % DAILY_OBJECTIVES[mode].length];
   return {
     dayKey,
     mode,
@@ -466,6 +466,7 @@ export default function App() {
   const runStartBestRef = useRef(0);
   const isPlayingRef = useRef(false);
   const hasRunStartedRef = useRef(false);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Surf state ────────────────────────────────────────────────────────────
   const [surferX, setSurferX] = useState(0.5);          // 0-1 across wave face
@@ -640,22 +641,27 @@ export default function App() {
 
   useEffect(() => {
     if (!saveReady) return;
-    const persist = async () => {
-      try {
-        const payload: SaveState = {
-          bestScores,
-          tokens,
-          lifetimeTokens,
-          ownedCharacters,
-          selectedCharacterId,
-          modeProgress,
-        };
-        await FileSystem.writeAsStringAsync(SAVE_FILE, JSON.stringify(payload));
-      } catch (error) {
-        void appendErrorLog(error, 'PersistSaveState');
-      }
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(() => {
+      void (async () => {
+        try {
+          const payload: SaveState = {
+            bestScores,
+            tokens,
+            lifetimeTokens,
+            ownedCharacters,
+            selectedCharacterId,
+            modeProgress,
+          };
+          await FileSystem.writeAsStringAsync(SAVE_FILE, JSON.stringify(payload));
+        } catch (error) {
+          void appendErrorLog(error, 'PersistSaveState');
+        }
+      })();
+    }, 150);
+    return () => {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     };
-    void persist();
   }, [appendErrorLog, bestScores, lifetimeTokens, modeProgress, ownedCharacters, saveReady, selectedCharacterId, tokens]);
 
   useEffect(() => {
