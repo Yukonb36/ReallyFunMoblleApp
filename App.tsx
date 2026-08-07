@@ -24,20 +24,15 @@ import {
 import {
   SURF, SKATE, HACKEY, SKYDIVE, BOXRACE, MILESTONES,
   STAGE2_TICK, STAGE3_TICK,
+  TICK_MS, SLOW_MOTION_BASE_DURATION, DRAG_DEADZONE_PX, CONTROLS_TIP_DURATION_MS, FLICK_TRICK_VELOCITY,
+  SURF_DRAG_SENSITIVITY, SKY_DRAG_SENSITIVITY, BOX_DRAG_SENSITIVITY, SKATE_PUMP_SENSITIVITY,
+  SLOW_MOTION_SPEED_MULT, SLOW_MOTION_TICK_DIVISOR, FEEDBACK, AUDIO_HOOKS,
 } from './src/config/tuning';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const TICK_MS = 50; // ~20 fps game tick
-const SLOW_MOTION_BASE_DURATION = 18;
 const DEFAULT_LOG_DIR = `${FileSystem.documentDirectory ?? ''}alpha-logs/`;
 const DEFAULT_LOG_FILE = `${DEFAULT_LOG_DIR}alpha-errors.txt`;
 const { width: SCREEN_W } = Dimensions.get('window');
-const DRAG_DEADZONE_PX = 10;
-const SURF_DRAG_SENSITIVITY = 0.55;
-const SKY_DRAG_SENSITIVITY = 0.22;
-const BOX_DRAG_SENSITIVITY = 0.24;
-const SKATE_PUMP_SENSITIVITY = 0.18;
-const FLICK_TRICK_VELOCITY = -1.15;
 
 const rewardedAd = RewardedAd.createForAdRequest(TestIds.REWARDED, {
   requestNonPersonalizedAdsOnly: true,
@@ -236,6 +231,7 @@ export default function App() {
   // ── refs ──────────────────────────────────────────────────────────────────
   const tickRef = useRef(0);
   const rewardedAtGameOverRef = useRef(false);
+  const runStartBestRef = useRef(0);
   const isPlayingRef = useRef(false);
 
   // ── Surf state ────────────────────────────────────────────────────────────
@@ -243,7 +239,9 @@ export default function App() {
   const [waveZones, setWaveZones] = useState<WaveZone[]>([]); // danger whitewater
   const [trickAirborne, setTrickAirborne] = useState(false);
   const [tubeMultiplier, setTubeMultiplier] = useState(1);
+  const trickAirborneRef = useRef(false);
   const surferXRef = useRef(0.5);
+  const tubeMultiplierRef = useRef(1);
   const surfDragOriginRef = useRef(0.5);
   const surfWavePhase = useRef(0); // for sinusoidal wave anim
   const surfAnimVal = useRef(new Animated.Value(0)).current;
@@ -261,9 +259,9 @@ export default function App() {
 
   // ── Hackey state ──────────────────────────────────────────────────────────
   const HACKEY_PLAYERS = useMemo<HackeyPlayer[]>(() =>
-    Array.from({ length: 6 }, (_, i) => ({
+    Array.from({ length: HACKEY.TARGET_COUNT }, (_, i) => ({
       id: i,
-      angle: (i * Math.PI * 2) / 6,
+      angle: (i * Math.PI * 2) / HACKEY.TARGET_COUNT,
     })), []);
   const [hackeyTarget, setHackeyTarget] = useState(0);   // player id
   const [hackeyWindow, setHackeyWindow] = useState(1);   // 0-1 shrinking
@@ -317,6 +315,13 @@ export default function App() {
   const [hitFlash, setHitFlash] = useState(false);          // brief red flash on hit
   const [milestoneMsg, setMilestoneMsg] = useState('');     // milestone toast
   const milestoneReachedRef = useRef<Set<number>>(new Set());
+  const audioCueCooldownUntilRef = useRef<Record<string, number>>({});
+  const recentSurfNearMissRef = useRef(0);
+  const recentHackeyDangerRef = useRef(0);
+  const recentSkydiveDangerRef = useRef(0);
+  const recentBoxDangerRef = useRef(0);
+  const surfHitCooldownRef = useRef(0);
+  const skateAirCooldownRef = useRef(0);
   const [reducedMotion, setReducedMotion] = useState(false);
   // Run summary (for game-over screen)
   const [runSummary, setRunSummary] = useState<{
@@ -331,6 +336,12 @@ export default function App() {
 
   const activeMode = GAME_MODES[selectedMode];
   const activeCharacter = CHARACTERS.find((c) => c.id === selectedCharacterId) ?? CHARACTERS[0];
+
+  const triggerAudioHook = useCallback((hookId: string, cooldownMs = 120) => {
+    const now = Date.now();
+    if ((audioCueCooldownUntilRef.current[hookId] ?? 0) > now) return;
+    audioCueCooldownUntilRef.current[hookId] = now + cooldownMs;
+  }, []);
 
   // ─── Error logging ────────────────────────────────────────────────────────
   const appendErrorLog = useCallback(async (error: unknown, context: string) => {
@@ -426,6 +437,8 @@ export default function App() {
   useEffect(() => { sensitivityRef.current = sensitivity; }, [sensitivity]);
   useEffect(() => { stylePhaseRef.current = stylePhase; }, [stylePhase]);
   useEffect(() => { styleTicksRef.current = styleTicks; }, [styleTicks]);
+  useEffect(() => { tubeMultiplierRef.current = tubeMultiplier; }, [tubeMultiplier]);
+  useEffect(() => { trickAirborneRef.current = trickAirborne; }, [trickAirborne]);
   useEffect(() => { slipstreamTicksRef.current = slipstreamTicks; }, [slipstreamTicks]);
   useEffect(() => { slipstreamActiveRef.current = slipstreamActive; }, [slipstreamActive]);
   useEffect(() => { barrelActiveRef.current = barrelActive; }, [barrelActive]);
@@ -441,7 +454,8 @@ export default function App() {
         if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
           milestoneReachedRef.current.add(m);
           setMilestoneMsg(`🏄 Milestone: ${m} pts!`);
-          setTimeout(() => setMilestoneMsg(''), 2500);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
+          triggerAudioHook(AUDIO_HOOKS.surf.STAGE_UP, 320);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         }
       }
@@ -457,9 +471,11 @@ export default function App() {
         diffStageRef.current = stage;
         setDiffStage(stage as 1 | 2 | 3);
         setMessage(stage === 2 ? '🌊 Wave picking up speed!' : '🌊🌊 Storm conditions!');
+        triggerAudioHook(AUDIO_HOOKS.surf.STAGE_UP, 500);
+        setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
       }
 
-      const barrelBonus = barrelActiveRef.current ? SURF.BARREL_MULTIPLIER : tubeMultiplier;
+      const barrelBonus = barrelActiveRef.current ? SURF.BARREL_MULTIPLIER : tubeMultiplierRef.current;
       // Score tick
       setScore((c) => {
         const next = c + barrelBonus;
@@ -468,15 +484,16 @@ export default function App() {
       });
 
       // Slow motion countdown (every ~8 ticks ≈ 400ms)
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
-      const speed = slowMotionSeconds > 0 ? SURF.WAVE_SPEED_SLOW : SURF.WAVE_SPEED_NORMAL;
+      const stageSpeed = stage === 3 ? SURF.WAVE_SPEED_S3 : stage === 2 ? SURF.WAVE_SPEED_S2 : SURF.WAVE_SPEED_S1;
+      const speed = slowMotionSeconds > 0 ? stageSpeed * SLOW_MOTION_SPEED_MULT : stageSpeed;
 
       // Barrel mechanic: holding sweet zone
       const inSweet = surferXRef.current > SURF.SWEET_ZONE_LO && surferXRef.current < SURF.SWEET_ZONE_HI;
-      if (inSweet && !trickAirborne && !barrelActiveRef.current) {
+      if (inSweet && !trickAirborneRef.current && !barrelActiveRef.current) {
         const newHold = barrelHoldTicksRef.current + 1;
         barrelHoldTicksRef.current = newHold;
         setBarrelHoldTicks(newHold);
@@ -484,6 +501,7 @@ export default function App() {
           barrelActiveRef.current = true;
           setBarrelActive(true);
           setMessage('🛢 BARREL! 3× score for 3 seconds!');
+          triggerAudioHook(AUDIO_HOOKS.surf.BARREL, 350);
           if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
           if (barrelTimerRef.current) clearTimeout(barrelTimerRef.current);
           barrelTimerRef.current = setTimeout(() => {
@@ -509,7 +527,7 @@ export default function App() {
         const moved = current
           .map((z) => ({ ...z, x: z.x - speed }))
           .filter((z) => z.x + z.width > 0);
-        if (tickRef.current % (slowMotionSeconds > 0 ? spawnInterval * 2 : spawnInterval) === 0) {
+        if (tickRef.current % (slowMotionSeconds > 0 ? Math.floor(spawnInterval / SLOW_MOTION_SPEED_MULT) : spawnInterval) === 0) {
           moved.push({
             id: Date.now() + Math.random(),
             x: 1.0,
@@ -527,14 +545,24 @@ export default function App() {
         const sx = surferXRef.current;
         const hit = zones.find((z) => sx > z.x && sx < z.x + z.width);
         // Near-miss feedback
-        const nearMiss = !hit && zones.find((z) => (Math.abs(sx - z.x) < 0.06 || Math.abs(sx - (z.x + z.width)) < 0.06));
-        if (nearMiss && !reducedMotion) void Haptics.selectionAsync();
-        if (hit && !trickAirborne) {
+        const nearMiss = !hit && zones.find((z) => (
+          Math.abs(sx - z.x) < SURF.NEAR_MISS_THRESHOLD || Math.abs(sx - (z.x + z.width)) < SURF.NEAR_MISS_THRESHOLD
+        ));
+        if (nearMiss && Date.now() - recentSurfNearMissRef.current > 350) {
+          recentSurfNearMissRef.current = Date.now();
+          setMessage('⚠️ Close call!');
+          triggerAudioHook(AUDIO_HOOKS.surf.NEAR_MISS, 260);
+          if (!reducedMotion) void Haptics.selectionAsync();
+        }
+        if (hit && !trickAirborneRef.current) {
+          if (tickRef.current < surfHitCooldownRef.current) return zones;
+          surfHitCooldownRef.current = tickRef.current + SURF.HIT_COOLDOWN_TICKS;
           if (shields > 0) {
             setShields((c) => c - 1);
             setMessage('Whitewater! Shield absorbed it!');
             setHitFlash(true);
-            setTimeout(() => setHitFlash(false), 300);
+            triggerAudioHook(AUDIO_HOOKS.surf.HIT, 260);
+            setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
             if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             return zones.filter((z) => z.id !== hit.id);
           }
@@ -542,7 +570,8 @@ export default function App() {
           isPlayingRef.current = false;
           setIsPlaying(false);
           setHitFlash(true);
-          setTimeout(() => setHitFlash(false), 400);
+          triggerAudioHook(AUDIO_HOOKS.surf.HIT, 260);
+          setTimeout(() => setHitFlash(false), FEEDBACK.FATAL_FLASH_MS);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
           setRunSummary({ ...runSummaryRef.current });
           setBestScores((c) => ({ ...c, surf: Math.max(c.surf, score) }));
@@ -552,7 +581,9 @@ export default function App() {
 
       // Sweet zone multiplier (barrel overrides)
       if (!barrelActiveRef.current) {
-        setTubeMultiplier(inSweet ? SURF.TUBE_MULTIPLIER_BONUS : 1);
+        const nextMultiplier = inSweet ? SURF.TUBE_MULTIPLIER_BONUS : 1;
+        tubeMultiplierRef.current = nextMultiplier;
+        setTubeMultiplier(nextMultiplier);
       }
     }, TICK_MS);
 
@@ -575,7 +606,7 @@ export default function App() {
         if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
           milestoneReachedRef.current.add(m);
           setMilestoneMsg(`🛹 Milestone: ${m} pts!`);
-          setTimeout(() => setMilestoneMsg(''), 2500);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         }
       }
@@ -591,6 +622,8 @@ export default function App() {
         diffStageRef.current = stage;
         setDiffStage(stage as 1 | 2 | 3);
         setMessage(stage === 2 ? '🛹 Crowd going wild!' : '🛹 EXPERT MODE!');
+        triggerAudioHook(AUDIO_HOOKS.skate.STAGE_UP, 500);
+        setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
       }
 
       const trickPool = stage === 3 ? SKATE.TRICK_NAMES_S3 : stage === 2 ? SKATE.TRICK_NAMES_S2 : SKATE.TRICK_NAMES_S1;
@@ -601,7 +634,7 @@ export default function App() {
         return next;
       });
 
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
@@ -623,7 +656,7 @@ export default function App() {
       const airborne = skateAirborneRef.current;
 
       if (airborne) {
-        const sm = slowMotionSeconds > 0 ? 0.5 : 1;
+        const sm = slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1;
         const newSpeed = curSpeed - GRAVITY * Math.sign(curAngle) * sm;
         const newAngle = curAngle + newSpeed * sm;
         skateSpeedRef.current = newSpeed;
@@ -632,7 +665,7 @@ export default function App() {
         setSkateAngle(newAngle);
 
         // Land when angle crosses 0
-        if (Math.abs(newAngle) < 0.05 && Math.abs(newSpeed) < 0.03) {
+        if (Math.abs(newAngle) < SKATE.LAND_ANGLE_THRESHOLD && Math.abs(newSpeed) < SKATE.LAND_SPEED_THRESHOLD) {
           skateAirborneRef.current = false;
           setSkateAirborne(false);
           const landBonus = SKATE.LAND_BONUS_PER_SHIELD * activeCharacter.shieldBonus;
@@ -642,11 +675,13 @@ export default function App() {
             const styleBonus = SKATE.STYLE_BONUS;
             setScore((c) => c + landBonus + styleBonus);
             setMessage(`🎨 STYLE BONUS! +${styleBonus} pts!`);
+            triggerAudioHook(AUDIO_HOOKS.skate.STYLE_BONUS, 340);
             runSummaryRef.current = { ...runSummaryRef.current, styleBonuses: (runSummaryRef.current.styleBonuses ?? 0) + 1 };
             if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           } else {
             setScore((c) => c + landBonus);
             setMessage(`Landed! +${landBonus} pts`);
+            triggerAudioHook(AUDIO_HOOKS.skate.LAND, 260);
           }
           if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
           // Reset style meter after landing
@@ -656,7 +691,7 @@ export default function App() {
           setStyleTicks(0);
         }
       } else {
-        const sm = slowMotionSeconds > 0 ? 0.5 : 1;
+        const sm = slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1;
         const newSpeed = (curSpeed - GRAVITY * Math.sin(curAngle) * sm) * FRICTION;
         const newAngle = curAngle + newSpeed * sm;
         skateSpeedRef.current = newSpeed;
@@ -666,11 +701,14 @@ export default function App() {
 
         // Launch off coping
         if (Math.abs(newAngle) > PIPE_RADIUS) {
+          if (tickRef.current < skateAirCooldownRef.current) return;
+          skateAirCooldownRef.current = tickRef.current + SKATE.AIR_EVENT_COOLDOWN_TICKS;
           skateAirborneRef.current = true;
           setSkateAirborne(true);
           const trick = trickPool[Math.floor(Math.random() * trickPool.length)];
           setSkateTrick(trick);
           setMessage(`Airborne! Tap for ${trick}!`);
+          triggerAudioHook(AUDIO_HOOKS.skate.AIR, 260);
           if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
           // Style Meter: advance from pump(1) to airborne(2)
           if (stylePhaseRef.current === 1) {
@@ -678,8 +716,9 @@ export default function App() {
             setStylePhase(2);
           }
           if (skateTrickTimeoutRef.current) clearTimeout(skateTrickTimeoutRef.current);
-          skateTrickTimeoutRef.current = setTimeout(() => setSkateTrick(null), 2000);
-          if (Math.random() > 0.5) {
+          skateTrickTimeoutRef.current = setTimeout(() => setSkateTrick(null), SKATE.TRICK_DISPLAY_MS);
+          const railSpawnChance = stage === 3 ? SKATE.RAIL_SPAWN_CHANCE_S3 : stage === 2 ? SKATE.RAIL_SPAWN_CHANCE_S2 : SKATE.RAIL_SPAWN_CHANCE_S1;
+          if (Math.random() < railSpawnChance) {
             setSkateRails((r) => [
               ...r.slice(-2),
               { id: Date.now(), side: newAngle > 0 ? 'right' : 'left', active: true },
@@ -709,7 +748,7 @@ export default function App() {
         if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
           milestoneReachedRef.current.add(m);
           setMilestoneMsg(`🤸 Milestone: ${m} pts!`);
-          setTimeout(() => setMilestoneMsg(''), 2500);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         }
       }
@@ -719,18 +758,22 @@ export default function App() {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
 
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
-      // Stage-based drain
-      const stageDrain = hackeyCombo >= HACKEY.WILD_COMBO_THRESHOLD
-        ? HACKEY.BASE_DRAIN_S3
-        : hackeyCombo >= HACKEY.FAKE_PLAYER_COMBO_THRESHOLD
-        ? HACKEY.BASE_DRAIN_S2
-        : HACKEY.BASE_DRAIN_S1;
-      const drain = (slowMotionSeconds > 0 ? 0.5 : 1) * stageDrain *
-        (1 + hackeyCombo * 0.03);
+      const stage = tickRef.current >= STAGE3_TICK ? 3 : tickRef.current >= STAGE2_TICK ? 2 : 1;
+      if (stage !== diffStageRef.current) {
+        diffStageRef.current = stage;
+        setDiffStage(stage as 1 | 2 | 3);
+        setMessage(stage === 2 ? '🤸 Rhythm speeding up!' : '🤸 Final rhythm push!');
+        triggerAudioHook(AUDIO_HOOKS.hackey.STAGE_UP, 500);
+        setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
+      }
+
+      const stageDrain = stage === 3 ? HACKEY.BASE_DRAIN_S3 : stage === 2 ? HACKEY.BASE_DRAIN_S2 : HACKEY.BASE_DRAIN_S1;
+      const drain = (slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1) * stageDrain *
+        (1 + hackeyCombo * HACKEY.COMBO_DRAIN_FACTOR);
       const newWindow = hackeyWindowRef.current - drain;
 
       if (newWindow <= 0) {
@@ -740,7 +783,8 @@ export default function App() {
         setHackeyCombo(0);
         setMessage(`Miss! ${HACKEY.MISS_LIMIT - newMisses} chances left`);
         setHitFlash(true);
-        setTimeout(() => setHitFlash(false), 300);
+        triggerAudioHook(AUDIO_HOOKS.hackey.MISS, 280);
+        setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
         if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
 
         if (newMisses >= HACKEY.MISS_LIMIT) {
@@ -751,7 +795,7 @@ export default function App() {
           return;
         }
 
-        const nextTarget = Math.floor(Math.random() * 6);
+        const nextTarget = Math.floor(Math.random() * HACKEY.TARGET_COUNT);
         hackeyTargetRef.current = nextTarget;
         hackeyWindowRef.current = 1;
         setHackeyTarget(nextTarget);
@@ -766,13 +810,19 @@ export default function App() {
         });
       }
 
+      if (newWindow > 0 && newWindow <= HACKEY.DANGER_WINDOW && Date.now() - recentHackeyDangerRef.current > 450) {
+        recentHackeyDangerRef.current = Date.now();
+        setMessage('⚠️ Late window!');
+        triggerAudioHook(AUDIO_HOOKS.hackey.DANGER, 300);
+      }
+
       // Animate sack position toward target player
       const targetPlayer = HACKEY_PLAYERS[hackeyTargetRef.current];
       const cx = 0.5 + Math.cos(targetPlayer.angle) * 0.35;
       const cy = 0.5 + Math.sin(targetPlayer.angle) * 0.35;
       setHackeySackPos((prev) => ({
-        x: prev.x + (cx - prev.x) * 0.1,
-        y: prev.y + (cy - prev.y) * 0.1,
+        x: prev.x + (cx - prev.x) * HACKEY.SACK_LERP,
+        y: prev.y + (cy - prev.y) * HACKEY.SACK_LERP,
       }));
     }, TICK_MS);
 
@@ -791,7 +841,7 @@ export default function App() {
         if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
           milestoneReachedRef.current.add(m);
           setMilestoneMsg(`🪂 Milestone: ${m} pts!`);
-          setTimeout(() => setMilestoneMsg(''), 2500);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         }
       }
@@ -806,7 +856,7 @@ export default function App() {
         return next;
       });
 
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
@@ -818,14 +868,17 @@ export default function App() {
           diffStageRef.current = altStage;
           setDiffStage(altStage as 1 | 2 | 3);
           setMessage(altStage === 2 ? '🌩 Wind picking up!' : '⚡ Storm layer — max turbulence!');
+          triggerAudioHook(AUDIO_HOOKS.skydive.STAGE_UP, 500);
+          setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
         }
         return next;
       });
 
       const stage = diffStageRef.current;
-      const GATE_GAP = (stage === 3 ? SKYDIVE.GATE_GAP_S3 : stage === 2 ? SKYDIVE.GATE_GAP_S2 : SKYDIVE.GATE_GAP_S1) + activeCharacter.controlBonus * 0.12;
+      const GATE_GAP = (stage === 3 ? SKYDIVE.GATE_GAP_S3 : stage === 2 ? SKYDIVE.GATE_GAP_S2 : SKYDIVE.GATE_GAP_S1)
+        + activeCharacter.controlBonus * SKYDIVE.CONTROL_GAP_BONUS_MULT;
       const stageSpeed = stage === 3 ? SKYDIVE.SPEED_S3 : stage === 2 ? SKYDIVE.SPEED_S2 : SKYDIVE.SPEED_S1;
-      const speed = stageSpeed * (slowMotionSeconds > 0 ? 0.5 : 1);
+      const speed = stageSpeed * (slowMotionSeconds > 0 ? SLOW_MOTION_SPEED_MULT : 1);
       const gateSpawn = stage === 3 ? SKYDIVE.GATE_SPAWN_S3 : stage === 2 ? SKYDIVE.GATE_SPAWN_S2 : SKYDIVE.GATE_SPAWN_S1;
       const cloudSpawn = stage === 3 ? SKYDIVE.CLOUD_SPAWN_S3 : stage === 2 ? SKYDIVE.CLOUD_SPAWN_S2 : SKYDIVE.CLOUD_SPAWN_S1;
 
@@ -852,7 +905,7 @@ export default function App() {
             id: Date.now() + Math.random(),
             x: Math.random(),
             y: -0.05,
-            r: 0.07 + Math.random() * 0.08,
+            r: SKYDIVE.CLOUD_RADIUS_MIN + Math.random() * (SKYDIVE.CLOUD_RADIUS_MAX - SKYDIVE.CLOUD_RADIUS_MIN),
           });
         }
         return moved;
@@ -862,13 +915,23 @@ export default function App() {
       setSkyGates((gates) => {
         const sx = skyXRef.current;
         const hit = gates.find((g) => {
-          if (g.y < 0.76 || g.y > 0.88) return false;
+          if (g.y < SKYDIVE.GATE_PASS_Y_MIN || g.y > SKYDIVE.GATE_PASS_Y_MAX) return false;
           const leftWall = g.gapX - GATE_GAP / 2;
           const rightWall = g.gapX + GATE_GAP / 2;
           return sx < leftWall || sx > rightWall;
         });
-        const clearedGate = gates.find((g) => g.y > 0.76 && g.y < 0.88 &&
+        const clearedGate = gates.find((g) => g.y > SKYDIVE.GATE_PASS_Y_MIN && g.y < SKYDIVE.GATE_PASS_Y_MAX &&
           sx >= g.gapX - GATE_GAP / 2 && sx <= g.gapX + GATE_GAP / 2);
+        const dangerGate = !hit && gates.find((g) => g.y > SKYDIVE.GATE_PASS_Y_MIN && g.y < SKYDIVE.GATE_PASS_Y_MAX && (
+          Math.abs(sx - (g.gapX - GATE_GAP / 2)) < SKYDIVE.DANGER_CENTER_MARGIN
+          || Math.abs(sx - (g.gapX + GATE_GAP / 2)) < SKYDIVE.DANGER_CENTER_MARGIN
+        ));
+        if (dangerGate && Date.now() - recentSkydiveDangerRef.current > 350) {
+          recentSkydiveDangerRef.current = Date.now();
+          setMessage('⚠️ Tight gap!');
+          triggerAudioHook(AUDIO_HOOKS.skydive.DANGER, 260);
+          if (!reducedMotion) void Haptics.selectionAsync();
+        }
         if (clearedGate) {
           const isPerfect = Math.abs(sx - clearedGate.gapX) <= SKYDIVE.PERFECT_CENTER_MARGIN;
           const gateScore = isPerfect ? SKYDIVE.PERFECT_GATE_SCORE : SKYDIVE.GATE_SCORE;
@@ -881,7 +944,10 @@ export default function App() {
           if (isPerfect) {
             setLastGatePerfect(true);
             setMessage(`🎯 Perfect thread! +${gateScore}`);
+            triggerAudioHook(AUDIO_HOOKS.skydive.GATE_PERFECT, 220);
             setTimeout(() => setLastGatePerfect(false), 600);
+          } else {
+            triggerAudioHook(AUDIO_HOOKS.skydive.GATE_CLEAR, 180);
           }
           if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         }
@@ -890,14 +956,16 @@ export default function App() {
             setShields((s) => s - 1);
             setMessage('Clipped the gate! Shield saved you!');
             setHitFlash(true);
-            setTimeout(() => setHitFlash(false), 300);
+            triggerAudioHook(AUDIO_HOOKS.skydive.HIT, 260);
+            setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
             if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             return gates.filter((g) => g.id !== hit.id);
           }
           isPlayingRef.current = false;
           setIsPlaying(false);
           setHitFlash(true);
-          setTimeout(() => setHitFlash(false), 400);
+          triggerAudioHook(AUDIO_HOOKS.skydive.HIT, 260);
+          setTimeout(() => setHitFlash(false), FEEDBACK.FATAL_FLASH_MS);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
           setRunSummary({ ...runSummaryRef.current });
           setBestScores((b) => ({ ...b, skydive: Math.max(b.skydive, score) }));
@@ -918,14 +986,16 @@ export default function App() {
             setShields((s) => s - 1);
             setMessage('Turbulence! Shield absorbed!');
             setHitFlash(true);
-            setTimeout(() => setHitFlash(false), 300);
+            triggerAudioHook(AUDIO_HOOKS.skydive.HIT, 260);
+            setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
             if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             return clouds.filter((c) => c.id !== hit.id);
           }
           isPlayingRef.current = false;
           setIsPlaying(false);
           setHitFlash(true);
-          setTimeout(() => setHitFlash(false), 400);
+          triggerAudioHook(AUDIO_HOOKS.skydive.HIT, 260);
+          setTimeout(() => setHitFlash(false), FEEDBACK.FATAL_FLASH_MS);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
           setRunSummary({ ...runSummaryRef.current });
           setBestScores((b) => ({ ...b, skydive: Math.max(b.skydive, score) }));
@@ -945,14 +1015,14 @@ export default function App() {
     if (!isPlaying || selectedMode !== 'boxrace') return;
 
     const BOX_COLORS = ['#FF4444', '#FF9900', '#CC44FF', '#FF66AA', '#44DDAA'];
-    const COLLISION_THRESHOLD = BOXRACE.COLLISION_THRESHOLD_BASE - activeCharacter.controlBonus * 0.18;
+    const COLLISION_THRESHOLD = BOXRACE.COLLISION_THRESHOLD_BASE - activeCharacter.controlBonus * BOXRACE.COLLISION_CONTROL_BONUS_MULT;
 
     const checkMilestones = (currentScore: number) => {
       for (const m of MILESTONES.boxrace) {
         if (currentScore >= m && !milestoneReachedRef.current.has(m)) {
           milestoneReachedRef.current.add(m);
           setMilestoneMsg(`📦 Milestone: ${m} pts!`);
-          setTimeout(() => setMilestoneMsg(''), 2500);
+          setTimeout(() => setMilestoneMsg(''), FEEDBACK.MILESTONE_TOAST_MS);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         }
       }
@@ -962,7 +1032,7 @@ export default function App() {
       if (!isPlayingRef.current) return;
       tickRef.current += 1;
 
-      if (slowMotionSeconds > 0 && tickRef.current % 8 === 0) {
+      if (slowMotionSeconds > 0 && tickRef.current % SLOW_MOTION_TICK_DIVISOR === 0) {
         setSlowMotionSeconds((c) => Math.max(c - 1, 0));
       }
 
@@ -972,6 +1042,8 @@ export default function App() {
         diffStageRef.current = stage;
         setDiffStage(stage as 1 | 2 | 3);
         setMessage(stage === 2 ? '📦 Rivals getting aggressive!' : '📦 DANGER ZONE!');
+        triggerAudioHook(AUDIO_HOOKS.boxrace.STAGE_UP, 500);
+        setTimeout(() => setMessage(''), FEEDBACK.STAGE_MESSAGE_MS);
       }
 
       const boxSpawn = stage === 3 ? BOXRACE.BOX_SPAWN_S3 : stage === 2 ? BOXRACE.BOX_SPAWN_S2 : BOXRACE.BOX_SPAWN_S1;
@@ -981,23 +1053,25 @@ export default function App() {
         runSummaryRef.current = { ...runSummaryRef.current, maxSpeed: next };
         return next;
       });
-      const baseSpeed = slowMotionSeconds > 0 ? 0.01 : racerSpeed;
+      const baseSpeed = slowMotionSeconds > 0 ? racerSpeed * SLOW_MOTION_SPEED_MULT : racerSpeed;
 
       // Slipstream mechanic: stay close behind a rival for bonus speed
       setRaceBoxes((boxes) => {
         const rx = racerXRef.current;
         const slipTarget = boxes.find((b) =>
-          Math.abs(rx - b.x) <= BOXRACE.SLIPSTREAM_DIST && b.y > 0.6 && b.y < 0.78,
+          Math.abs(rx - b.x) <= BOXRACE.SLIPSTREAM_DIST && b.y > BOXRACE.SLIPSTREAM_Y_MIN && b.y < BOXRACE.SLIPSTREAM_Y_MAX,
         );
         if (slipTarget) {
           const newTicks = slipstreamTicksRef.current + 1;
           slipstreamTicksRef.current = newTicks;
           setSlipstreamTicks(newTicks);
+          if (newTicks % 10 === 0) triggerAudioHook(AUDIO_HOOKS.boxrace.SLIPSTREAM_CHARGE, 100);
           if (newTicks >= BOXRACE.SLIPSTREAM_TICKS && !slipstreamActiveRef.current) {
             slipstreamActiveRef.current = true;
             setSlipstreamActive(true);
             setScore((c) => c + BOXRACE.SLIPSTREAM_SCORE);
             setMessage(`💨 SLIPSTREAM! +${BOXRACE.SLIPSTREAM_SCORE} speed burst!`);
+            triggerAudioHook(AUDIO_HOOKS.boxrace.SLIPSTREAM_BURST, 300);
             runSummaryRef.current = { ...runSummaryRef.current, slipstreams: (runSummaryRef.current.slipstreams ?? 0) + 1 };
             if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
             setTimeout(() => {
@@ -1005,7 +1079,7 @@ export default function App() {
               setSlipstreamActive(false);
               slipstreamTicksRef.current = 0;
               setSlipstreamTicks(0);
-            }, 1500);
+            }, BOXRACE.SLIPSTREAM_ACTIVE_MS);
           }
         } else {
           if (!slipstreamActiveRef.current) {
@@ -1022,7 +1096,7 @@ export default function App() {
             id: Date.now() + Math.random(),
             x: 0.1 + Math.random() * 0.7,
             y: -0.08,
-            speed: 0.005 + Math.random() * 0.008,
+            speed: BOXRACE.RIVAL_SPEED_MIN + Math.random() * (BOXRACE.RIVAL_SPEED_MAX - BOXRACE.RIVAL_SPEED_MIN),
             color: BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)],
           });
         }
@@ -1053,21 +1127,33 @@ export default function App() {
         const rx = racerXRef.current;
         const hit = boxes.find((b) => {
           const dx = Math.abs(rx - b.x);
-          return dx < COLLISION_THRESHOLD && b.y > 0.8 && b.y < 0.96;
+          return dx < COLLISION_THRESHOLD && b.y > BOXRACE.COLLISION_Y_MIN && b.y < BOXRACE.COLLISION_Y_MAX;
         });
+        const danger = !hit && boxes.find((b) => {
+          const dx = Math.abs(rx - b.x);
+          return dx < COLLISION_THRESHOLD + BOXRACE.DANGER_X_MARGIN && b.y > BOXRACE.COLLISION_Y_MIN && b.y < BOXRACE.COLLISION_Y_MAX;
+        });
+        if (danger && Date.now() - recentBoxDangerRef.current > 350) {
+          recentBoxDangerRef.current = Date.now();
+          setMessage('⚠️ Incoming rival!');
+          triggerAudioHook(AUDIO_HOOKS.boxrace.DANGER, 260);
+          if (!reducedMotion) void Haptics.selectionAsync();
+        }
         if (hit) {
           if (shields > 0) {
             setShields((s) => s - 1);
             setMessage('Crash! Shield absorbed it!');
             setHitFlash(true);
-            setTimeout(() => setHitFlash(false), 300);
+            triggerAudioHook(AUDIO_HOOKS.boxrace.HIT, 260);
+            setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
             if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             return boxes.filter((b) => b.id !== hit.id);
           }
           isPlayingRef.current = false;
           setIsPlaying(false);
           setHitFlash(true);
-          setTimeout(() => setHitFlash(false), 400);
+          triggerAudioHook(AUDIO_HOOKS.boxrace.HIT, 260);
+          setTimeout(() => setHitFlash(false), FEEDBACK.FATAL_FLASH_MS);
           if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
           setRunSummary({ ...runSummaryRef.current });
           setBestScores((b) => ({ ...b, boxrace: Math.max(b.boxrace, score) }));
@@ -1079,11 +1165,12 @@ export default function App() {
         const rx = racerXRef.current;
         const hit = boosts.find((b) => {
           const dx = Math.abs(rx - b.x);
-          return dx < BOXRACE.BOOST_PICKUP_THRESHOLD && b.y > 0.8 && b.y < 0.96;
+          return dx < BOXRACE.BOOST_PICKUP_THRESHOLD && b.y > BOXRACE.BOOST_PICKUP_Y_MIN && b.y < BOXRACE.BOOST_PICKUP_Y_MAX;
         });
         if (hit) {
           setScore((c) => c + BOXRACE.BOOST_SCORE);
           setMessage(`⚡ Boost! +${BOXRACE.BOOST_SCORE}`);
+          triggerAudioHook(AUDIO_HOOKS.boxrace.BOOST, 220);
           if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         }
         return hit ? boosts.filter((b) => b.id !== hit.id) : boosts;
@@ -1106,6 +1193,7 @@ export default function App() {
     setWaveZones([]);
     setTrickAirborne(false);
     setTubeMultiplier(1);
+    tubeMultiplierRef.current = 1;
     surfWavePhase.current = 0;
     // Skate
     setSkateAngle(0);
@@ -1117,7 +1205,7 @@ export default function App() {
     skateSpeedRef.current = 0.04;
     skateAirborneRef.current = false;
     // Hackey
-    const firstTarget = Math.floor(Math.random() * 6);
+    const firstTarget = Math.floor(Math.random() * HACKEY.TARGET_COUNT);
     setHackeyTarget(firstTarget);
     setHackeyWindow(1);
     setHackeyMisses(0);
@@ -1165,6 +1253,7 @@ export default function App() {
 
   const startGame = useCallback((mode: GameModeKey) => {
     resetGameState(mode);
+    runStartBestRef.current = bestScores[mode];
     setSelectedMode(mode);
     setShields(activeCharacter.shieldBonus);
     setIsPlaying(true);
@@ -1172,18 +1261,19 @@ export default function App() {
     setScreen('game');
     if (controlsTipTimeoutRef.current) clearTimeout(controlsTipTimeoutRef.current);
     setShowControlsTip(true);
-    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), 4500);
-  }, [resetGameState, activeCharacter.shieldBonus]);
+    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), CONTROLS_TIP_DURATION_MS);
+  }, [resetGameState, activeCharacter.shieldBonus, bestScores]);
 
   const restartGame = useCallback(() => {
     resetGameState(selectedMode);
+    runStartBestRef.current = bestScores[selectedMode];
     setShields(activeCharacter.shieldBonus);
     setIsPlaying(true);
     isPlayingRef.current = true;
     if (controlsTipTimeoutRef.current) clearTimeout(controlsTipTimeoutRef.current);
     setShowControlsTip(true);
-    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), 4500);
-  }, [resetGameState, selectedMode, activeCharacter.shieldBonus]);
+    controlsTipTimeoutRef.current = setTimeout(() => setShowControlsTip(false), CONTROLS_TIP_DURATION_MS);
+  }, [resetGameState, selectedMode, activeCharacter.shieldBonus, bestScores]);
 
   // ─── Surf: PanResponder ───────────────────────────────────────────────────
   const surfPanResponder = useMemo(() => PanResponder.create({
@@ -1210,14 +1300,15 @@ export default function App() {
         setTrickAirborne(true);
         setMessage('Aerial trick! 🤙');
         setScore((c) => c + SURF.AERIAL_SCORE);
+        triggerAudioHook(AUDIO_HOOKS.surf.AERIAL, 260);
         if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         setTimeout(() => {
           setTrickAirborne(false);
           setMessage('');
-        }, 1200);
+        }, SURF.AERIAL_DURATION_MS);
       }
     },
-  }), [activeCharacter.controlBonus, selectedMode, trickAirborne, reducedMotion]);
+  }), [activeCharacter.controlBonus, selectedMode, trickAirborne, reducedMotion, triggerAudioHook]);
 
   // ─── Skate: PanResponder ──────────────────────────────────────────────────
   const skatePanResponder = useMemo(() => PanResponder.create({
@@ -1229,6 +1320,7 @@ export default function App() {
         // Trick tap while airborne — advance style meter to tricked(3)
         setScore((c) => c + SKATE.TRICK_SCORE);
         setMessage(`Trick confirmed! +${SKATE.TRICK_SCORE}`);
+        triggerAudioHook(AUDIO_HOOKS.skate.TRICK_CONFIRM, 220);
         setSkateTrick(null);
         if (stylePhaseRef.current === 2) {
           stylePhaseRef.current = 3;
@@ -1242,6 +1334,7 @@ export default function App() {
         const push = -dragX / SCREEN_W * Math.max(0.1, SKATE_PUMP_SENSITIVITY - activeCharacter.controlBonus * 0.35) * sensitivityRef.current;
         skateSpeedRef.current = clamp(skateSpeedRef.current + push, -0.12, 0.12);
         setSkateSpeed(skateSpeedRef.current);
+        triggerAudioHook(AUDIO_HOOKS.skate.PUMP, 180);
         // Style Meter: pump starts the sequence (phase idle→pump)
         if (stylePhaseRef.current === 0) {
           stylePhaseRef.current = 1;
@@ -1252,7 +1345,7 @@ export default function App() {
         if (!reducedMotion) void Haptics.selectionAsync();
       }
     },
-  }), [activeCharacter.controlBonus, selectedMode, reducedMotion]);
+  }), [activeCharacter.controlBonus, selectedMode, reducedMotion, triggerAudioHook]);
 
   // ─── Skydive: PanResponder ────────────────────────────────────────────────
   const skydivePanResponder = useMemo(() => PanResponder.create({
@@ -1309,13 +1402,19 @@ export default function App() {
       if (isPerfect) {
         setLastTapPerfect(true);
         setMessage(`⚡ PERFECT! +${bonus} (combo x${nextCombo})`);
+        triggerAudioHook(AUDIO_HOOKS.hackey.TAP_PERFECT, 220);
         setTimeout(() => setLastTapPerfect(false), 500);
         if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
       } else {
         setMessage(`Nice! +${bonus} (combo x${nextCombo})`);
+        triggerAudioHook(AUDIO_HOOKS.hackey.TAP_GOOD, 200);
         if (!reducedMotion) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       }
-      const nextTarget = Math.floor(Math.random() * 6);
+      if (nextCombo > 0 && nextCombo % FEEDBACK.COMBO_BURST_INTERVAL === 0) {
+        setMessage(`🔥 Combo burst x${nextCombo}!`);
+        triggerAudioHook(AUDIO_HOOKS.hackey.COMBO_BURST, 280);
+      }
+      const nextTarget = Math.floor(Math.random() * HACKEY.TARGET_COUNT);
       hackeyTargetRef.current = nextTarget;
       hackeyWindowRef.current = 1;
       setHackeyTarget(nextTarget);
@@ -1327,7 +1426,8 @@ export default function App() {
       setHackeyCombo(0);
       setMessage(`Wrong player! ${HACKEY.MISS_LIMIT - newMisses} left`);
       setHitFlash(true);
-      setTimeout(() => setHitFlash(false), 300);
+      triggerAudioHook(AUDIO_HOOKS.hackey.MISS, 220);
+      setTimeout(() => setHitFlash(false), FEEDBACK.HIT_FLASH_MS);
       if (!reducedMotion) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       if (newMisses >= HACKEY.MISS_LIMIT) {
         isPlayingRef.current = false;
@@ -1336,7 +1436,7 @@ export default function App() {
         setBestScores((c) => ({ ...c, hackey: Math.max(c.hackey, score) }));
       }
     }
-  }, [hackeyCombo, score, reducedMotion]);
+  }, [hackeyCombo, score, reducedMotion, triggerAudioHook]);
 
   // ─── Ad ───────────────────────────────────────────────────────────────────
   const watchRewardAd = useCallback(() => {
@@ -2001,7 +2101,7 @@ export default function App() {
   );
 
   const renderGameOver = () => {
-    const isNewBest = score > bestScores[selectedMode] && score > 0;
+    const isNewBest = score > runStartBestRef.current && score > 0;
     return (
       <View style={styles.gameOverOverlay}>
         <Text style={styles.gameOverTitle}>Run Over</Text>
