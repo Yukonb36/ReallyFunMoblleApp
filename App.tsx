@@ -10,6 +10,7 @@ import {
   StyleSheet,
   Text,
   View,
+  type ViewStyle,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
@@ -25,6 +26,12 @@ const SLOW_MOTION_BASE_DURATION = 18;
 const DEFAULT_LOG_DIR = `${FileSystem.documentDirectory ?? ''}alpha-logs/`;
 const DEFAULT_LOG_FILE = `${DEFAULT_LOG_DIR}alpha-errors.txt`;
 const { width: SCREEN_W } = Dimensions.get('window');
+const DRAG_DEADZONE_PX = 10;
+const SURF_DRAG_SENSITIVITY = 0.55;
+const SKY_DRAG_SENSITIVITY = 0.22;
+const BOX_DRAG_SENSITIVITY = 0.24;
+const SKATE_PUMP_SENSITIVITY = 0.18;
+const FLICK_TRICK_VELOCITY = -1.15;
 
 const rewardedAd = RewardedAd.createForAdRequest(TestIds.REWARDED, {
   requestNonPersonalizedAdsOnly: true,
@@ -49,8 +56,13 @@ type Character = {
   name: string;
   cost: number;
   color: string;
+  secondaryColor: string;
+  accentColor: string;
   shieldBonus: number;
   slowMotionBonus: number;
+  controlBonus: number;
+  persona: string;
+  signatureMove: string;
   bonusDescription: string;
 };
 
@@ -122,44 +134,68 @@ const GAME_MODES: Record<GameModeKey, GameMode> = {
 const CHARACTERS: Character[] = [
   {
     id: 'rookie',
-    name: 'Rookie Rider',
+    name: 'Maya Coast',
     cost: 0,
     color: '#40E0D0',
+    secondaryColor: '#1B3F4A',
+    accentColor: '#9BE9FF',
     shieldBonus: 1,
     slowMotionBonus: 0,
-    bonusDescription: 'Balanced starter character.',
+    controlBonus: 0.02,
+    persona: 'Festival all-rounder',
+    signatureMove: 'Calm recovery and steady lines.',
+    bonusDescription: 'Balanced starter with smoother handling.',
   },
   {
     id: 'wave-pro',
-    name: 'Wave Pro',
+    name: 'Kai Tidebreaker',
     cost: 120,
     color: '#56A3FF',
+    secondaryColor: '#102C59',
+    accentColor: '#9ECCFF',
     shieldBonus: 2,
     slowMotionBonus: 3,
-    bonusDescription: '+1 extra shield & longer slow motion.',
+    controlBonus: 0.05,
+    persona: 'Barrel specialist',
+    signatureMove: 'Reads sections early and trims through turbulence.',
+    bonusDescription: 'Extra shield, longer focus, tighter wave control.',
   },
   {
     id: 'street-ace',
-    name: 'Street Ace',
+    name: 'Rhea Volt',
     cost: 220,
     color: '#FF8E5B',
+    secondaryColor: '#4B1D18',
+    accentColor: '#FFD2B6',
     shieldBonus: 2,
     slowMotionBonus: 5,
-    bonusDescription: 'Extended boost for high-score pushes.',
+    controlBonus: 0.07,
+    persona: 'Street aerial ace',
+    signatureMove: 'Fast hand speed for sharper landings and lane changes.',
+    bonusDescription: 'Longer focus window and sharper precision at speed.',
   },
   {
     id: 'freestyle-legend',
-    name: 'Freestyle Legend',
+    name: 'Atlas Nova',
     cost: 420,
     color: '#E8C850',
+    secondaryColor: '#4D360D',
+    accentColor: '#FFF2A8',
     shieldBonus: 3,
     slowMotionBonus: 7,
-    bonusDescription: 'Elite unlock with max survivability perks.',
+    controlBonus: 0.1,
+    persona: 'Legendary headliner',
+    signatureMove: 'Elite reflexes with the strongest survival kit in the roster.',
+    bonusDescription: 'Top-tier durability, focus time, and elite control.',
   },
 ];
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const applyGestureDeadzone = (distance: number) =>
+  Math.abs(distance) <= DRAG_DEADZONE_PX
+    ? 0
+    : distance - Math.sign(distance) * DRAG_DEADZONE_PX;
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -196,6 +232,7 @@ export default function App() {
   const [trickAirborne, setTrickAirborne] = useState(false);
   const [tubeMultiplier, setTubeMultiplier] = useState(1);
   const surferXRef = useRef(0.5);
+  const surfDragOriginRef = useRef(0.5);
   const surfWavePhase = useRef(0); // for sinusoidal wave anim
   const surfAnimVal = useRef(new Animated.Value(0)).current;
 
@@ -232,6 +269,7 @@ export default function App() {
   const [skyAltitude, setSkyAltitude] = useState(10000);    // display altitude ft
   const [skyGatesCleared, setSkyGatesCleared] = useState(0);
   const skyXRef = useRef(0.5);
+  const skyDragOriginRef = useRef(0.5);
 
   // ── Box Race state ────────────────────────────────────────────────────────
   const [racerX, setRacerX] = useState(0.5);               // 0-1 track position
@@ -239,6 +277,7 @@ export default function App() {
   const [raceBoosts, setRaceBoosts] = useState<{ id: number; x: number; y: number }[]>([]);
   const [racerSpeed, setRacerSpeed] = useState(0);
   const racerXRef = useRef(0.5);
+  const raceDragOriginRef = useRef(0.5);
 
   const activeMode = GAME_MODES[selectedMode];
   const activeCharacter = CHARACTERS.find((c) => c.id === selectedCharacterId) ?? CHARACTERS[0];
@@ -538,7 +577,7 @@ export default function App() {
   useEffect(() => {
     if (!isPlaying || selectedMode !== 'skydive') return;
 
-    const GATE_GAP = 0.28; // fraction of width that is "safe" in each gate
+    const GATE_GAP = 0.28 + activeCharacter.controlBonus * 0.12; // fraction of width that is "safe" in each gate
 
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
@@ -638,7 +677,7 @@ export default function App() {
 
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, selectedMode, slowMotionSeconds, shields, score]);
+  }, [activeCharacter.controlBonus, isPlaying, selectedMode, slowMotionSeconds, shields, score]);
 
   // ══════════════════════════════════════════════════════════════════════════
   //  BOX RACE GAME LOOP
@@ -647,6 +686,8 @@ export default function App() {
     if (!isPlaying || selectedMode !== 'boxrace') return;
 
     const BOX_COLORS = ['#FF4444', '#FF9900', '#CC44FF', '#FF66AA', '#44DDAA'];
+    const COLLISION_THRESHOLD = 0.1 - activeCharacter.controlBonus * 0.18;
+    const BOOST_PICKUP_THRESHOLD = 0.1;
 
     const interval = setInterval(() => {
       if (!isPlayingRef.current) return;
@@ -699,7 +740,7 @@ export default function App() {
         const rx = racerXRef.current;
         const hit = boxes.find((b) => {
           const dx = Math.abs(rx - b.x);
-          return dx < 0.1 && b.y > 0.8 && b.y < 0.96;
+          return dx < COLLISION_THRESHOLD && b.y > 0.8 && b.y < 0.96;
         });
         if (hit) {
           if (shields > 0) {
@@ -719,7 +760,7 @@ export default function App() {
         const rx = racerXRef.current;
         const hit = boosts.find((b) => {
           const dx = Math.abs(rx - b.x);
-          return dx < 0.1 && b.y > 0.8 && b.y < 0.96;
+          return dx < BOOST_PICKUP_THRESHOLD && b.y > 0.8 && b.y < 0.96;
         });
         if (hit) {
           setScore((c) => c + 30);
@@ -731,7 +772,7 @@ export default function App() {
 
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, selectedMode, slowMotionSeconds, shields, score, racerSpeed]);
+  }, [activeCharacter.controlBonus, isPlaying, selectedMode, slowMotionSeconds, shields, score, racerSpeed]);
 
   const resetGameState = useCallback((mode: GameModeKey) => {
     tickRef.current = 0;
@@ -800,15 +841,24 @@ export default function App() {
   const surfPanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => selectedMode === 'surf' && isPlayingRef.current,
     onMoveShouldSetPanResponder: () => selectedMode === 'surf' && isPlayingRef.current,
+    onPanResponderGrant: () => {
+      surfDragOriginRef.current = surferXRef.current;
+    },
     onPanResponderMove: (_, gs) => {
       if (!isPlayingRef.current) return;
-      const newX = clamp(surferXRef.current + gs.dx / SCREEN_W, 0.05, 0.95);
+      const dragX = applyGestureDeadzone(gs.dx);
+      const newX = clamp(
+        surfDragOriginRef.current
+          + dragX / SCREEN_W * Math.max(0.36, SURF_DRAG_SENSITIVITY - activeCharacter.controlBonus),
+        0.05,
+        0.95,
+      );
       surferXRef.current = newX;
       setSurferX(newX);
     },
     onPanResponderRelease: (_, gs) => {
       // Flick up = trick aerial
-      if (gs.vy < -0.8 && !trickAirborne) {
+      if (gs.vy < FLICK_TRICK_VELOCITY && !trickAirborne) {
         setTrickAirborne(true);
         setMessage('Aerial trick! 🤙');
         setScore((c) => c + 80);
@@ -818,7 +868,7 @@ export default function App() {
         }, 1200);
       }
     },
-  }), [selectedMode, trickAirborne]);
+  }), [activeCharacter.controlBonus, selectedMode, trickAirborne]);
 
   // ─── Skate: PanResponder ──────────────────────────────────────────────────
   const skatePanResponder = useMemo(() => PanResponder.create({
@@ -833,36 +883,56 @@ export default function App() {
         setSkateTrick(null);
       } else {
         // Pump: swipe left/right gives angular velocity
-        const push = -gs.dx / SCREEN_W * 0.3;
-        skateSpeedRef.current = clamp(skateSpeedRef.current + push, -0.15, 0.15);
+        const dragX = applyGestureDeadzone(gs.dx);
+        if (dragX === 0) return;
+        const push = -dragX / SCREEN_W * Math.max(0.1, SKATE_PUMP_SENSITIVITY - activeCharacter.controlBonus * 0.35);
+        skateSpeedRef.current = clamp(skateSpeedRef.current + push, -0.12, 0.12);
         setSkateSpeed(skateSpeedRef.current);
       }
     },
-  }), [selectedMode]);
+  }), [activeCharacter.controlBonus, selectedMode]);
 
   // ─── Skydive: PanResponder ────────────────────────────────────────────────
   const skydivePanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => selectedMode === 'skydive' && isPlayingRef.current,
     onMoveShouldSetPanResponder: () => selectedMode === 'skydive' && isPlayingRef.current,
+    onPanResponderGrant: () => {
+      skyDragOriginRef.current = skyXRef.current;
+    },
     onPanResponderMove: (_, gs) => {
       if (!isPlayingRef.current) return;
-      const newX = clamp(skyXRef.current + gs.dx / SCREEN_W * 0.05, 0.05, 0.95);
+      const dragX = applyGestureDeadzone(gs.dx);
+      const newX = clamp(
+        skyDragOriginRef.current
+          + dragX / SCREEN_W * Math.max(0.1, SKY_DRAG_SENSITIVITY - activeCharacter.controlBonus * 0.5),
+        0.05,
+        0.95,
+      );
       skyXRef.current = newX;
       setSkyX(newX);
     },
-  }), [selectedMode]);
+  }), [activeCharacter.controlBonus, selectedMode]);
 
   // ─── Box Race: PanResponder ───────────────────────────────────────────────
   const boxRacePanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => selectedMode === 'boxrace' && isPlayingRef.current,
     onMoveShouldSetPanResponder: () => selectedMode === 'boxrace' && isPlayingRef.current,
+    onPanResponderGrant: () => {
+      raceDragOriginRef.current = racerXRef.current;
+    },
     onPanResponderMove: (_, gs) => {
       if (!isPlayingRef.current) return;
-      const newX = clamp(racerXRef.current + gs.dx / SCREEN_W * 0.06, 0.08, 0.92);
+      const dragX = applyGestureDeadzone(gs.dx);
+      const newX = clamp(
+        raceDragOriginRef.current
+          + dragX / SCREEN_W * Math.max(0.12, BOX_DRAG_SENSITIVITY - activeCharacter.controlBonus * 0.45),
+        0.08,
+        0.92,
+      );
       racerXRef.current = newX;
       setRacerX(newX);
     },
-  }), [selectedMode]);
+  }), [activeCharacter.controlBonus, selectedMode]);
 
   // ─── Hackey: tap a player ─────────────────────────────────────────────────
   const hackeyTap = useCallback((playerId: number) => {
@@ -928,17 +998,121 @@ export default function App() {
   //  RENDER HELPERS
   // ══════════════════════════════════════════════════════════════════════════
 
+  const renderSkillDots = (label: string, value: number, color: string) => (
+    <View style={styles.skillRow}>
+      <Text style={styles.skillLabel}>{label}</Text>
+      <View style={styles.skillDots}>
+        {Array.from({ length: 4 }, (_, index) => (
+          <View
+            key={`${label}-${index}`}
+            style={[
+              styles.skillDot,
+              {
+                backgroundColor: index < value ? color : '#193148',
+                borderColor: index < value ? color : '#25435E',
+              },
+            ]}
+          />
+        ))}
+      </View>
+    </View>
+  );
+
+  const renderCharacterPortrait = (character: Character, variant: 'hero' | 'card' = 'card') => {
+    const width = variant === 'hero' ? 168 : 104;
+    const height = variant === 'hero' ? 208 : 128;
+    const scale = variant === 'hero' ? 1 : 0.72;
+
+    return (
+      <View style={[styles.characterPortraitFrame, { width, height, borderColor: character.accentColor }]}>
+        <View style={[styles.characterPortraitAura, { backgroundColor: character.accentColor }]} />
+        <View style={[styles.characterPortraitSky, { backgroundColor: character.secondaryColor }]} />
+        <View style={[styles.characterPortraitSun, { backgroundColor: character.accentColor }]} />
+        <View style={[styles.characterPortraitGround, { backgroundColor: character.color }]} />
+        <View style={[styles.characterPortraitBoard, { backgroundColor: character.secondaryColor }]} />
+        <View style={[styles.characterPortraitFigure, { transform: [{ scale }] }]}>
+          <View style={[styles.characterPortraitLeg, styles.characterPortraitLegLeft, { backgroundColor: character.secondaryColor }]} />
+          <View style={[styles.characterPortraitLeg, styles.characterPortraitLegRight, { backgroundColor: character.secondaryColor }]} />
+          <View style={[styles.characterPortraitArm, styles.characterPortraitArmLeft, { backgroundColor: character.color }]} />
+          <View style={[styles.characterPortraitArm, styles.characterPortraitArmRight, { backgroundColor: character.color }]} />
+          <View style={[styles.characterPortraitTorso, { backgroundColor: character.color }]} />
+          <View style={styles.characterPortraitNeck} />
+          <View style={styles.characterPortraitHead}>
+            <View style={[styles.characterPortraitHair, { backgroundColor: character.secondaryColor }]} />
+            <View style={styles.characterPortraitFace}>
+              <View style={styles.characterPortraitEyeRow}>
+                <View style={styles.characterPortraitEye} />
+                <View style={styles.characterPortraitEye} />
+              </View>
+            </View>
+          </View>
+        </View>
+        <View style={styles.characterPortraitBadge}>
+          <Text style={styles.characterPortraitBadgeText}>{character.persona}</Text>
+        </View>
+      </View>
+    );
+  };
+
+  const renderActionCharacter = (
+    pose: 'surf' | 'skate' | 'sky' | 'race',
+    character: Character,
+    positionStyle: ViewStyle,
+  ) => (
+    <View style={[styles.actionCharacterWrap, positionStyle]}>
+      <View style={[styles.actionCharacterGlow, { backgroundColor: character.accentColor }]} />
+      {pose === 'sky' ? (
+        <>
+          <View style={[styles.actionCanopy, { backgroundColor: character.secondaryColor }]} />
+          <View style={[styles.actionCanopyLine, styles.actionCanopyLineLeft]} />
+          <View style={[styles.actionCanopyLine, styles.actionCanopyLineRight]} />
+        </>
+      ) : pose === 'skate' ? (
+        <>
+          <View style={[styles.actionBoard, { backgroundColor: character.accentColor }]} />
+          <View style={[styles.actionSkateWheel, styles.actionSkateWheelLeft]} />
+          <View style={[styles.actionSkateWheel, styles.actionSkateWheelRight]} />
+        </>
+      ) : (
+        <View
+          style={[
+            pose === 'race' ? styles.actionRaceBody : styles.actionBoard,
+            { backgroundColor: pose === 'race' ? character.secondaryColor : character.accentColor },
+          ]}
+        />
+      )}
+      <View style={[styles.actionLeg, styles.actionLegLeft, { backgroundColor: character.secondaryColor }]} />
+      <View style={[styles.actionLeg, styles.actionLegRight, { backgroundColor: character.secondaryColor }]} />
+      <View style={[styles.actionArm, styles.actionArmLeft, { backgroundColor: character.color }]} />
+      <View style={[styles.actionArm, styles.actionArmRight, { backgroundColor: character.color }]} />
+      <View style={[styles.actionTorso, { backgroundColor: character.color }]} />
+      <View style={styles.actionNeck} />
+      <View style={styles.actionHead}>
+        <View style={[styles.actionHair, { backgroundColor: character.secondaryColor }]} />
+        <View style={styles.actionFace}>
+          <View style={styles.actionEyes}>
+            <View style={styles.actionEye} />
+            <View style={styles.actionEye} />
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+
   const renderSurfGame = () => {
     const waveY = 55 + Math.sin(surfWavePhase.current) * 4;
     return (
       <View style={styles.gameArea} {...surfPanResponder.panHandlers}>
-        {/* Ocean background gradient suggestion */}
+        <View style={styles.surfSky} />
+        <View style={styles.surfSun} />
+        <View style={[styles.surfCliff, styles.surfCliffLeft]} />
+        <View style={[styles.surfCliff, styles.surfCliffRight]} />
         <View style={[styles.surfOcean, { top: `${waveY}%` }]} />
+        <View style={styles.surfOceanGlow} />
 
-        {/* Wave crest line */}
         <View style={[styles.waveCrease, { top: `${waveY - 2}%` }]} />
+        <View style={[styles.waveFoam, { top: `${waveY - 5}%` }]} />
 
-        {/* Sweet zone indicator */}
         <View style={styles.sweetZone}>
           {tubeMultiplier > 1 && (
             <View style={styles.sweetZoneGlow} />
@@ -960,18 +1134,18 @@ export default function App() {
           />
         ))}
 
-        {/* Surfer */}
-        <View
-          style={[
-            styles.surfer,
-            {
-              left: `${surferX * 100 - 4}%` as `${number}%`,
-              top: `${waveY - 14}%` as `${number}%`,
-              backgroundColor: trickAirborne ? '#FFD700' : activeCharacter.color,
-              transform: trickAirborne ? [{ scale: 1.4 }, { rotate: '30deg' }] : [],
-            },
-          ]}
-        />
+        {renderActionCharacter(
+          'surf',
+          {
+            ...activeCharacter,
+            color: trickAirborne ? '#FFD46A' : activeCharacter.color,
+          },
+          {
+            left: `${surferX * 100 - 7}%` as `${number}%`,
+            top: `${waveY - 19}%` as `${number}%`,
+            transform: trickAirborne ? [{ scale: 1.2 }, { rotate: '24deg' }] : undefined,
+          },
+        )}
 
         {/* HUD labels */}
         <View style={styles.surfHudOverlay}>
@@ -999,7 +1173,10 @@ export default function App() {
 
     return (
       <View style={styles.gameArea} {...skatePanResponder.panHandlers}>
-        {/* Pipe walls */}
+        <View style={styles.skateSky} />
+        <View style={styles.skateSun} />
+        <View style={styles.skateCityline} />
+        <View style={styles.skateCrowdGlow} />
         <View style={styles.pipeLeft} />
         <View style={styles.pipeRight} />
         <View style={styles.pipeBottom} />
@@ -1020,18 +1197,11 @@ export default function App() {
           />
         ))}
 
-        {/* Skater */}
-        <View
-          style={[
-            styles.skater,
-            {
-              left: `${skaterX - 3}%` as `${number}%`,
-              top: `${airY - 4}%` as `${number}%`,
-              backgroundColor: activeCharacter.color,
-              transform: [{ rotate: `${skateAngle * 45}deg` }],
-            },
-          ]}
-        />
+        {renderActionCharacter('skate', activeCharacter, {
+          left: `${skaterX - 6}%` as `${number}%`,
+          top: `${airY - 8}%` as `${number}%`,
+          transform: [{ rotate: `${skateAngle * 45}deg` }],
+        })}
 
         {/* Trick indicator */}
         {skateTrick && (
@@ -1055,7 +1225,8 @@ export default function App() {
 
     return (
       <View style={styles.gameArea}>
-        {/* Background circle track */}
+        <View style={styles.hackeyArenaGlow} />
+        <View style={styles.hackeyArenaLights} />
         <View style={styles.hackeyTrack} />
 
         {/* Sack */}
@@ -1089,7 +1260,13 @@ export default function App() {
                 },
               ]}
             >
-              <Text style={styles.hackeyPlayerEmoji}>{isTarget ? '🤸' : '🧍'}</Text>
+              <View style={[styles.hackeyPlayerHead, { backgroundColor: isTarget ? '#FFD6B3' : '#D2A37B' }]} />
+              <View
+                style={[
+                  styles.hackeyPlayerBody,
+                  { backgroundColor: isTarget ? activeCharacter.color : '#556A84' },
+                ]}
+              />
             </Pressable>
           );
         })}
@@ -1127,8 +1304,10 @@ export default function App() {
 
   const renderSkydiveGame = () => (
     <View style={styles.gameArea} {...skydivePanResponder.panHandlers}>
-      {/* Sky background */}
       <View style={styles.skyBg} />
+      <View style={styles.skyGlow} />
+      <View style={styles.skySun} />
+      <View style={styles.skyHorizon} />
 
       {/* Cloud turbulence pockets */}
       {skyClouds.map((c) => (
@@ -1166,16 +1345,10 @@ export default function App() {
         );
       })}
 
-      {/* Skydiver */}
-      <View
-        style={[
-          styles.skydiver,
-          {
-            left: `${skyX * 100 - 4}%` as `${number}%`,
-            backgroundColor: activeCharacter.color,
-          },
-        ]}
-      />
+      {renderActionCharacter('sky', activeCharacter, {
+        left: `${skyX * 100 - 7}%` as `${number}%`,
+        top: '73%',
+      })}
 
       {/* HUD overlay */}
       <View style={styles.skyHud}>
@@ -1191,10 +1364,12 @@ export default function App() {
 
   const renderBoxRaceGame = () => (
     <View style={styles.gameArea} {...boxRacePanResponder.panHandlers}>
-      {/* Track */}
+      <View style={styles.raceCrowdGlow} />
       <View style={styles.raceTrack} />
       <View style={[styles.raceEdge, { left: '8%' }]} />
       <View style={[styles.raceEdge, { right: '8%' }]} />
+      <View style={styles.raceLaneStripe} />
+      <View style={[styles.raceLaneStripe, styles.raceLaneStripeBottom]} />
 
       {/* Boost pads */}
       {raceBoosts.map((b) => (
@@ -1229,17 +1404,20 @@ export default function App() {
         </View>
       ))}
 
-      {/* Player box */}
       <View
         style={[
           styles.playerBox,
           {
-            left: `${racerX * 100 - 5}%` as `${number}%`,
+            left: `${racerX * 100 - 6}%` as `${number}%`,
             backgroundColor: activeCharacter.color,
           },
         ]}
       >
-        <Text style={styles.playerBoxEmoji}>🏎</Text>
+        {renderActionCharacter('race', activeCharacter, {
+          left: '3%',
+          top: '-6%',
+          transform: [{ scale: 0.82 }],
+        })}
       </View>
 
       <Text style={styles.raceHint}>Drag to steer</Text>
@@ -1310,33 +1488,44 @@ export default function App() {
                     style={[styles.charCard, isSelected && { borderColor: char.color }]}
                   >
                     <View style={[styles.charColorBar, { backgroundColor: char.color }]} />
+                    <View style={styles.charArtWrap}>{renderCharacterPortrait(char)}</View>
                     <View style={styles.charCardBody}>
                       <View style={styles.charCardTop}>
-                        <Text style={styles.charCardName}>{char.name}</Text>
-                        {isOwned ? (
-                          <View
-                            style={[
-                              styles.charBadge,
-                              isSelected ? styles.charBadgeEquipped : styles.charBadgeOwned,
-                            ]}
-                          >
-                            <Text style={styles.charBadgeText}>
-                              {isSelected ? 'Equipped' : 'Owned'}
-                            </Text>
-                          </View>
-                        ) : (
-                          <View style={styles.charBadgeLocked}>
-                            <Text style={styles.charBadgeText}>🔒 {char.cost}</Text>
-                          </View>
-                        )}
+                        <View style={styles.charCardIdentity}>
+                          <Text style={styles.charCardName}>{char.name}</Text>
+                          <Text style={styles.charCardPersona}>{char.persona}</Text>
+                        </View>
+                        <View style={styles.charCardBadgeColumn}>
+                          {isOwned ? (
+                            <View
+                              style={[
+                                styles.charBadge,
+                                isSelected ? styles.charBadgeEquipped : styles.charBadgeOwned,
+                              ]}
+                            >
+                              <Text style={styles.charBadgeText}>
+                                {isSelected ? 'Equipped' : 'Owned'}
+                              </Text>
+                            </View>
+                          ) : (
+                            <View style={styles.charBadgeLocked}>
+                              <Text style={styles.charBadgeText}>🔒 {char.cost}</Text>
+                            </View>
+                          )}
+                        </View>
                       </View>
                       <Text style={styles.charCardDesc}>{char.bonusDescription}</Text>
+                      <Text style={styles.charCardMove}>{char.signatureMove}</Text>
                       <Text style={styles.charCardSub}>
                         🛡 +{char.shieldBonus} shield
                         {char.slowMotionBonus > 0
                           ? `   ⏱ +${char.slowMotionBonus}s slow motion`
                           : ''}
                       </Text>
+                      <View style={styles.charSkillsPanel}>
+                        {renderSkillDots('Focus', Math.min(4, 1 + Math.floor(char.slowMotionBonus / 2)), char.accentColor)}
+                        {renderSkillDots('Control', Math.min(4, 1 + Math.round(char.controlBonus * 20)), char.color)}
+                      </View>
                     </View>
                   </Pressable>
                 );
@@ -1354,13 +1543,30 @@ export default function App() {
             showsVerticalScrollIndicator={false}
           >
             <View style={styles.heroSection}>
-              <Text style={styles.heroEmoji}>🤙</Text>
-              <Text style={styles.heroTitle}>Retro Rush</Text>
-              <Text style={styles.heroTagline}>Pick your sport. Earn your run.</Text>
-              <Text style={styles.heroDesc}>
-                Three extreme sport arcade games — surf the wave face, pump the half pipe, and
-                keep the hacky sack alive — with characters, tokens, and high scores to chase.
-              </Text>
+              <View style={styles.heroBackdrop} />
+              <View style={styles.heroGlow} />
+              <View style={styles.heroCopy}>
+                <Text style={styles.heroKicker}>Festival Edition</Text>
+                <Text style={styles.heroTitle}>Retro Rush</Text>
+                <Text style={styles.heroTagline}>Sharper controls. Bigger worlds. Hero unlocks.</Text>
+                <Text style={styles.heroDesc}>
+                  Ride through richer environments, unlock headline athletes, and push farther with
+                  steadier touch handling across every event.
+                </Text>
+              </View>
+              <View style={styles.heroPortraitWrap}>{renderCharacterPortrait(activeCharacter, 'hero')}</View>
+            </View>
+
+            <View style={styles.featureCard}>
+              <View style={styles.featureCopy}>
+                <Text style={styles.featureEyebrow}>Featured athlete</Text>
+                <Text style={styles.featureTitle}>{activeCharacter.name}</Text>
+                <Text style={styles.featureBody}>{activeCharacter.signatureMove}</Text>
+                <View style={styles.featureSkills}>
+                  {renderSkillDots('Survival', Math.min(4, activeCharacter.shieldBonus), activeCharacter.color)}
+                  {renderSkillDots('Control', Math.min(4, 1 + Math.round(activeCharacter.controlBonus * 20)), activeCharacter.accentColor)}
+                </View>
+              </View>
             </View>
 
             <View style={styles.statsBar}>
@@ -1461,6 +1667,7 @@ export default function App() {
                     pressed && styles.pressed,
                   ]}
                 >
+                  <View style={[styles.modeCardBackdrop, { backgroundColor: mode.accentColor + '18' }]} />
                   <View style={styles.modeCardTop}>
                     <Text style={styles.modeEmoji}>{mode.emoji}</Text>
                     <View style={styles.modeCardInfo}>
@@ -1480,6 +1687,11 @@ export default function App() {
                     <Text style={styles.modeCardBest}>
                       Best: <Text style={{ color: mode.accentColor }}>{bestScores[key]}</Text>
                     </Text>
+                  </View>
+                  <View style={styles.modeCardScene}>
+                    <View style={[styles.modeSceneOrb, { backgroundColor: mode.accentColor }]} />
+                    <View style={[styles.modeSceneLine, { backgroundColor: mode.accentColor + '88' }]} />
+                    <Text style={styles.modeSceneCopy}>{activeCharacter.persona}</Text>
                   </View>
                   <View style={[styles.startPill, { backgroundColor: mode.accentColor }]}>
                     <Text style={styles.startPillText}>TAP TO PLAY</Text>
@@ -1557,14 +1769,69 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.75 },
 
   // ── Landing ──────────────────────────────────────────────────────────────
-  heroSection: { alignItems: 'center', paddingVertical: 28 },
-  heroEmoji: { fontSize: 52, marginBottom: 8 },
-  heroTitle: { color: '#E6F7FF', fontSize: 40, fontWeight: '800', letterSpacing: 1 },
-  heroTagline: { color: '#56B0FF', fontSize: 16, fontWeight: '600', marginTop: 6, marginBottom: 12 },
-  heroDesc: { color: '#7FA8C7', fontSize: 14, textAlign: 'center', lineHeight: 20, paddingHorizontal: 8 },
+  heroSection: {
+    minHeight: 300,
+    borderRadius: 28,
+    overflow: 'hidden',
+    padding: 22,
+    marginBottom: 18,
+    backgroundColor: '#112742',
+    borderWidth: 1,
+    borderColor: '#1E4263',
+    justifyContent: 'space-between',
+  },
+  heroBackdrop: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#09192D',
+  },
+  heroGlow: {
+    position: 'absolute',
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    right: -50,
+    top: -30,
+    backgroundColor: '#0E4460',
+    opacity: 0.65,
+  },
+  heroCopy: { maxWidth: '56%', gap: 8 },
+  heroKicker: {
+    color: '#8FCFFF',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+  },
+  heroTitle: { color: '#F5FBFF', fontSize: 40, fontWeight: '900', letterSpacing: 0.8 },
+  heroTagline: { color: '#9FD0F6', fontSize: 17, fontWeight: '700', lineHeight: 22 },
+  heroDesc: { color: '#BED6EA', fontSize: 14, lineHeight: 21 },
+  heroPortraitWrap: {
+    position: 'absolute',
+    right: 14,
+    bottom: 14,
+  },
+  featureCard: {
+    backgroundColor: '#0E1E30',
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: '#21415F',
+    padding: 18,
+    marginBottom: 16,
+  },
+  featureCopy: { gap: 8 },
+  featureEyebrow: {
+    color: '#56B0FF',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
+  },
+  featureTitle: { color: '#F1F8FF', fontSize: 24, fontWeight: '800' },
+  featureBody: { color: '#92B6D2', fontSize: 14, lineHeight: 20 },
+  featureSkills: { gap: 8, marginTop: 4 },
   statsBar: {
-    flexDirection: 'row', backgroundColor: '#0E1E30', borderRadius: 14,
-    borderWidth: 1, borderColor: '#1E3550', paddingVertical: 14,
+    flexDirection: 'row', backgroundColor: '#0E1E30', borderRadius: 18,
+    borderWidth: 1, borderColor: '#1E3550', paddingVertical: 16,
     marginBottom: 18, alignItems: 'center', justifyContent: 'space-around',
   },
   statItem: { alignItems: 'center', gap: 4 },
@@ -1597,7 +1864,15 @@ const styles = StyleSheet.create({
   backBtn: { paddingVertical: 8, paddingHorizontal: 4, width: 64 },
   backBtnText: { color: '#7FB4D8', fontWeight: '700', fontSize: 15 },
   navTitle: { color: '#E6F7FF', fontWeight: '800', fontSize: 18 },
-  modeCard: { borderWidth: 1.5, borderRadius: 16, padding: 16, marginBottom: 16, gap: 10 },
+  modeCard: { borderWidth: 1.5, borderRadius: 20, padding: 16, marginBottom: 16, gap: 12, overflow: 'hidden' },
+  modeCardBackdrop: {
+    position: 'absolute',
+    top: -30,
+    right: -20,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+  },
   modeCardTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   modeEmoji: { fontSize: 36 },
   modeCardInfo: { flex: 1, gap: 3 },
@@ -1608,6 +1883,17 @@ const styles = StyleSheet.create({
   modeCardBottom: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   modeCardRule: { color: '#6E97BB', fontSize: 13, flex: 1 },
   modeCardBest: { color: '#6E97BB', fontSize: 13, fontWeight: '600' },
+  modeCardScene: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1A3550',
+    padding: 12,
+    backgroundColor: '#081523AA',
+    gap: 8,
+  },
+  modeSceneOrb: { width: 42, height: 42, borderRadius: 21, opacity: 0.8 },
+  modeSceneLine: { height: 5, borderRadius: 999, width: '55%' },
+  modeSceneCopy: { color: '#A9C5DD', fontSize: 12, fontWeight: '600' },
   startPill: { borderRadius: 8, paddingVertical: 10, alignItems: 'center' },
   startPillText: { color: '#06111E', fontWeight: '800', fontSize: 13, letterSpacing: 1 },
 
@@ -1626,15 +1912,190 @@ const styles = StyleSheet.create({
 
   // ── Game area ─────────────────────────────────────────────────────────────
   gameArea: { flex: 1, position: 'relative', overflow: 'hidden', backgroundColor: '#111D30' },
+  actionCharacterWrap: {
+    position: 'absolute',
+    width: 56,
+    height: 72,
+  },
+  actionCharacterGlow: {
+    position: 'absolute',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    top: 8,
+    left: 8,
+    opacity: 0.18,
+  },
+  actionBoard: {
+    position: 'absolute',
+    left: 6,
+    bottom: 8,
+    width: 44,
+    height: 10,
+    borderRadius: 999,
+  },
+  actionSkateWheel: {
+    position: 'absolute',
+    bottom: 4,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#0D1522',
+    borderWidth: 1,
+    borderColor: '#FFFFFF55',
+  },
+  actionSkateWheelLeft: { left: 12 },
+  actionSkateWheelRight: { right: 12 },
+  actionRaceBody: {
+    position: 'absolute',
+    left: 4,
+    bottom: 2,
+    width: 48,
+    height: 18,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#FFFFFF44',
+  },
+  actionCanopy: {
+    position: 'absolute',
+    top: 0,
+    left: 6,
+    width: 44,
+    height: 18,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    borderBottomLeftRadius: 6,
+    borderBottomRightRadius: 6,
+  },
+  actionCanopyLine: {
+    position: 'absolute',
+    top: 16,
+    width: 2,
+    height: 20,
+    backgroundColor: '#D5E7F2',
+  },
+  actionCanopyLineLeft: { left: 18, transform: [{ rotate: '12deg' }] },
+  actionCanopyLineRight: { right: 18, transform: [{ rotate: '-12deg' }] },
+  actionLeg: {
+    position: 'absolute',
+    bottom: 18,
+    width: 8,
+    height: 22,
+    borderRadius: 8,
+  },
+  actionLegLeft: { left: 17, transform: [{ rotate: '8deg' }] },
+  actionLegRight: { right: 17, transform: [{ rotate: '-8deg' }] },
+  actionArm: {
+    position: 'absolute',
+    top: 30,
+    width: 7,
+    height: 20,
+    borderRadius: 7,
+  },
+  actionArmLeft: { left: 11, transform: [{ rotate: '28deg' }] },
+  actionArmRight: { right: 11, transform: [{ rotate: '-28deg' }] },
+  actionTorso: {
+    position: 'absolute',
+    top: 26,
+    left: 16,
+    width: 24,
+    height: 26,
+    borderRadius: 12,
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
+  },
+  actionNeck: {
+    position: 'absolute',
+    top: 21,
+    left: 24,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#F4C6A2',
+  },
+  actionHead: {
+    position: 'absolute',
+    top: 8,
+    left: 16,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: '#F4C6A2',
+  },
+  actionHair: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 11,
+    borderBottomLeftRadius: 6,
+    borderBottomRightRadius: 6,
+  },
+  actionFace: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingTop: 5,
+  },
+  actionEyes: { flexDirection: 'row', gap: 4 },
+  actionEye: { width: 3, height: 3, borderRadius: 2, backgroundColor: '#102030' },
 
   // ── Surf ──────────────────────────────────────────────────────────────────
+  surfSky: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#08233A',
+  },
+  surfSun: {
+    position: 'absolute',
+    top: '14%',
+    right: '12%',
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: '#FFBE7A',
+    opacity: 0.85,
+  },
+  surfCliff: {
+    position: 'absolute',
+    top: '28%',
+    width: '28%',
+    height: '18%',
+    backgroundColor: '#1D4053',
+  },
+  surfCliffLeft: {
+    left: '-4%',
+    borderTopRightRadius: 40,
+    borderBottomRightRadius: 22,
+  },
+  surfCliffRight: {
+    right: '-2%',
+    borderTopLeftRadius: 46,
+    borderBottomLeftRadius: 18,
+  },
   surfOcean: {
     position: 'absolute', left: 0, right: 0, bottom: 0,
     backgroundColor: '#0A3A6A', opacity: 0.85,
   },
+  surfOceanGlow: {
+    position: 'absolute',
+    left: '10%',
+    right: '10%',
+    bottom: '12%',
+    height: '16%',
+    borderRadius: 40,
+    backgroundColor: '#2ECFFF22',
+  },
   waveCrease: {
     position: 'absolute', left: 0, right: 0, height: 5,
     backgroundColor: '#4DD0FF', opacity: 0.7, borderRadius: 3,
+  },
+  waveFoam: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 20,
+    backgroundColor: '#DDF8FF33',
   },
   sweetZone: {
     position: 'absolute', left: '35%', right: '35%', top: 0, bottom: 0,
@@ -1658,6 +2119,39 @@ const styles = StyleSheet.create({
   trickLabel: { color: '#FFD700', fontWeight: '800', fontSize: 18 },
 
   // ── Skate ─────────────────────────────────────────────────────────────────
+  skateSky: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#1B0F1F',
+  },
+  skateSun: {
+    position: 'absolute',
+    top: '10%',
+    left: '12%',
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    backgroundColor: '#FF8E5B',
+    opacity: 0.5,
+  },
+  skateCityline: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: '24%',
+    height: '18%',
+    backgroundColor: '#120914',
+    borderTopWidth: 2,
+    borderColor: '#5A2A2A',
+  },
+  skateCrowdGlow: {
+    position: 'absolute',
+    left: '18%',
+    right: '18%',
+    bottom: '20%',
+    height: '6%',
+    borderRadius: 999,
+    backgroundColor: '#FF6B6B33',
+  },
   pipeLeft: {
     position: 'absolute', left: 0, top: '20%', bottom: 0, width: '12%',
     backgroundColor: '#2A1A0A', borderTopRightRadius: 120, borderRightWidth: 3, borderColor: '#8B5C2A',
@@ -1695,6 +2189,25 @@ const styles = StyleSheet.create({
   },
 
   // ── Hackey ────────────────────────────────────────────────────────────────
+  hackeyArenaGlow: {
+    position: 'absolute',
+    top: '12%',
+    left: '14%',
+    right: '14%',
+    height: '20%',
+    borderRadius: 999,
+    backgroundColor: '#8A5CFF22',
+  },
+  hackeyArenaLights: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: '8%',
+    height: 18,
+    backgroundColor: '#2A144A',
+    borderBottomWidth: 1,
+    borderColor: '#6030A0',
+  },
   hackeyTrack: {
     position: 'absolute', top: '10%', left: '8%', right: '8%', bottom: '18%',
     borderRadius: 500, borderWidth: 1, borderColor: '#3A2A60', backgroundColor: '#140D2A',
@@ -1708,7 +2221,19 @@ const styles = StyleSheet.create({
     position: 'absolute', width: 48, height: 48, borderRadius: 24,
     borderWidth: 2, alignItems: 'center', justifyContent: 'center',
   },
-  hackeyPlayerEmoji: { fontSize: 22 },
+  hackeyPlayerHead: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    marginBottom: 3,
+  },
+  hackeyPlayerBody: {
+    width: 18,
+    height: 16,
+    borderRadius: 8,
+    borderTopLeftRadius: 6,
+    borderTopRightRadius: 6,
+  },
   hackeyWindowBar: {
     position: 'absolute', bottom: 0, left: 0, right: 0, height: 8,
     backgroundColor: '#1A0D33',
@@ -1758,20 +2283,162 @@ const styles = StyleSheet.create({
   modalCloseText: { color: '#5E84A2', fontSize: 18, fontWeight: '700' },
   modalTokens: { color: '#56B0FF', fontWeight: '700', fontSize: 14, marginBottom: 12 },
   charCard: {
-    flexDirection: 'row', backgroundColor: '#0E1E30', borderRadius: 14,
+    flexDirection: 'row', backgroundColor: '#0E1E30', borderRadius: 18,
     borderWidth: 1.5, borderColor: '#1E3550', marginBottom: 10, overflow: 'hidden',
   },
   charColorBar: { width: 6 },
-  charCardBody: { flex: 1, padding: 12, gap: 4 },
+  charArtWrap: { paddingVertical: 10, paddingLeft: 10 },
+  charCardBody: { flex: 1, padding: 12, gap: 6 },
   charCardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  charCardIdentity: { flex: 1, gap: 2, paddingRight: 8 },
   charCardName: { color: '#E6F7FF', fontWeight: '700', fontSize: 15 },
+  charCardPersona: { color: '#79A6C8', fontSize: 12, fontWeight: '600' },
+  charCardBadgeColumn: { alignItems: 'flex-end', justifyContent: 'center' },
   charBadge: { borderRadius: 20, paddingHorizontal: 10, paddingVertical: 3 },
   charBadgeOwned: { backgroundColor: '#1E3550' },
   charBadgeEquipped: { backgroundColor: '#1B4D2A' },
   charBadgeLocked: { backgroundColor: '#2A2A40', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 3 },
   charBadgeText: { color: '#CFE8FF', fontSize: 11, fontWeight: '700' },
   charCardDesc: { color: '#7FA8C7', fontSize: 12 },
+  charCardMove: { color: '#D8E9F9', fontSize: 12, lineHeight: 18 },
   charCardSub: { color: '#4E7490', fontSize: 12 },
+  charSkillsPanel: { gap: 6, marginTop: 2 },
+  characterPortraitFrame: {
+    borderRadius: 18,
+    overflow: 'hidden',
+    borderWidth: 1,
+    backgroundColor: '#0C1621',
+  },
+  characterPortraitAura: {
+    position: 'absolute',
+    width: '80%',
+    height: '55%',
+    borderRadius: 999,
+    top: '10%',
+    right: '-8%',
+    opacity: 0.2,
+  },
+  characterPortraitSky: {
+    ...StyleSheet.absoluteFill,
+    opacity: 0.9,
+  },
+  characterPortraitSun: {
+    position: 'absolute',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    top: 14,
+    right: 14,
+    opacity: 0.78,
+  },
+  characterPortraitGround: {
+    position: 'absolute',
+    left: -10,
+    right: -10,
+    bottom: 0,
+    height: '28%',
+    opacity: 0.35,
+  },
+  characterPortraitBoard: {
+    position: 'absolute',
+    left: '18%',
+    right: '18%',
+    bottom: '18%',
+    height: 10,
+    borderRadius: 999,
+    opacity: 0.9,
+  },
+  characterPortraitFigure: {
+    position: 'absolute',
+    left: '50%',
+    top: '48%',
+    width: 82,
+    height: 110,
+    marginLeft: -41,
+    marginTop: -55,
+  },
+  characterPortraitLeg: {
+    position: 'absolute',
+    bottom: 18,
+    width: 12,
+    height: 34,
+    borderRadius: 10,
+  },
+  characterPortraitLegLeft: { left: 24, transform: [{ rotate: '8deg' }] },
+  characterPortraitLegRight: { right: 24, transform: [{ rotate: '-8deg' }] },
+  characterPortraitArm: {
+    position: 'absolute',
+    top: 40,
+    width: 10,
+    height: 28,
+    borderRadius: 10,
+  },
+  characterPortraitArmLeft: { left: 14, transform: [{ rotate: '24deg' }] },
+  characterPortraitArmRight: { right: 14, transform: [{ rotate: '-24deg' }] },
+  characterPortraitTorso: {
+    position: 'absolute',
+    top: 34,
+    left: 24,
+    width: 34,
+    height: 38,
+    borderRadius: 16,
+    borderTopLeftRadius: 12,
+    borderTopRightRadius: 12,
+  },
+  characterPortraitNeck: {
+    position: 'absolute',
+    top: 26,
+    left: 37,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#F4C6A2',
+  },
+  characterPortraitHead: {
+    position: 'absolute',
+    top: 6,
+    left: 26,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    overflow: 'hidden',
+    backgroundColor: '#F4C6A2',
+  },
+  characterPortraitHair: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 16,
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
+  },
+  characterPortraitFace: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingTop: 8,
+  },
+  characterPortraitEyeRow: { flexDirection: 'row', gap: 6 },
+  characterPortraitEye: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#0D2133' },
+  characterPortraitBadge: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: '#08111CDD',
+    borderWidth: 1,
+    borderColor: '#29445F',
+  },
+  characterPortraitBadgeText: {
+    color: '#E9F5FF',
+    fontSize: 10,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
 
   // ── Shared ────────────────────────────────────────────────────────────────
   messageBanner: {
@@ -1779,11 +2446,47 @@ const styles = StyleSheet.create({
     paddingVertical: 10, paddingHorizontal: 14, marginBottom: 14, alignItems: 'center',
   },
   messageText: { color: '#7ED8A0', fontWeight: '700', fontSize: 13, textAlign: 'center' },
+  skillRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  skillLabel: { color: '#95B8D4', fontSize: 11, fontWeight: '700', letterSpacing: 0.4 },
+  skillDots: { flexDirection: 'row', gap: 5 },
+  skillDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 1,
+  },
 
   // ── Skydive ────────────────────────────────────────────────────────────────
   skyBg: {
     ...StyleSheet.absoluteFill,
     backgroundColor: '#0A2A5C',
+  },
+  skyGlow: {
+    position: 'absolute',
+    top: '8%',
+    left: '12%',
+    right: '12%',
+    height: '18%',
+    borderRadius: 999,
+    backgroundColor: '#7FDBFF22',
+  },
+  skySun: {
+    position: 'absolute',
+    top: '12%',
+    left: '16%',
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    backgroundColor: '#FFF1A4',
+    opacity: 0.55,
+  },
+  skyHorizon: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: '10%',
+    height: '22%',
+    backgroundColor: '#2A537B44',
   },
   skyCloud: {
     position: 'absolute',
@@ -1844,6 +2547,15 @@ const styles = StyleSheet.create({
   },
 
   // ── Box Race ──────────────────────────────────────────────────────────────
+  raceCrowdGlow: {
+    position: 'absolute',
+    left: '10%',
+    right: '10%',
+    top: '8%',
+    height: '12%',
+    borderRadius: 999,
+    backgroundColor: '#FFB83022',
+  },
   raceTrack: {
     ...StyleSheet.absoluteFill,
     marginHorizontal: '8%',
@@ -1857,6 +2569,19 @@ const styles = StyleSheet.create({
     width: 6,
     backgroundColor: '#FFB830',
     opacity: 0.7,
+  },
+  raceLaneStripe: {
+    position: 'absolute',
+    left: '48%',
+    right: '48%',
+    top: '10%',
+    bottom: '54%',
+    backgroundColor: '#FFE09A55',
+    borderRadius: 999,
+  },
+  raceLaneStripeBottom: {
+    top: '58%',
+    bottom: '8%',
   },
   boostPad: {
     position: 'absolute',
@@ -1884,9 +2609,9 @@ const styles = StyleSheet.create({
   playerBox: {
     position: 'absolute',
     top: '82%',
-    width: 44,
-    height: 44,
-    borderRadius: 8,
+    width: 60,
+    height: 60,
+    borderRadius: 14,
     borderWidth: 3,
     borderColor: '#FFFFFF99',
     alignItems: 'center',
