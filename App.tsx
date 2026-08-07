@@ -1172,7 +1172,7 @@ export default function App() {
           style={[
             styles.gameSurfboard,
             {
-              left: `${surferX * 100 - 12}%` as `${number}%`,
+              left: `${Math.max(surferX * 100 - 12, 0)}%` as `${number}%`,
               top: `${waveY - 12}%` as `${number}%`,
               transform: trickAirborne
                 ? [{ rotate: '22deg' }, { scaleX: 1.08 }]
@@ -1264,13 +1264,13 @@ export default function App() {
           />
         ))}
 
-        {/* Skateboard deck with four wheels */}
+        {/* Skateboard deck with four wheels — offset mirrors the character's own positioning */}
         <View
           style={[
             styles.skateboardDeck,
             {
               left: `${skaterX - 7}%` as `${number}%`,
-              top: `${airY + 1}%` as `${number}%`,
+              top: `${airY}%` as `${number}%`,
               transform: [{ rotate: `${skateAngle * 45}deg` }],
             },
           ]}
